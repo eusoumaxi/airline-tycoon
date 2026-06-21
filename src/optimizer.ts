@@ -4,6 +4,7 @@ import {
   MIN_FILL,
   SKIP_RENTALS,
   TIGHTEN_ROUNDS,
+  TIME_GRANULARITY,
   WEEK_SECONDS,
 } from "./config.ts";
 import { canFly, capacityOf, linesByHub, roundTripDuration } from "./model.ts";
@@ -259,26 +260,29 @@ function phaseOffset(id: number): number {
 }
 
 /**
- * Generate an aircraft's takeOffTimes. Flights are spread with uniform slack and
- * given a per-aircraft pseudo-random PHASE offset (cyclic), so they don't all
- * start Monday 00:00: each aircraft begins at a different point of the week and
- * aircraft flying the same route end up staggered. Still non-overlapping and
- * fills the week (rotation preserves the gaps; a flight may cross the week
- * boundary, which the game accepts).
+ * Generate an aircraft's takeOffTimes. Works on a TIME_GRANULARITY (900 s) grid
+ * because the game requires every takeOffTime to be a multiple of it. Each flight
+ * reserves ceil(duration / 900) slots (so they never overlap), the slack is
+ * spread uniformly, and a per-aircraft pseudo-random PHASE offset (cyclic) means
+ * they don't all start Monday 00:00 — aircraft on the same route are staggered.
  */
 function scheduleTimes(a: Aircraft): { takeOffTime: number; lineId: number }[] {
   const n = a.assigned.length;
   if (n === 0) return [];
-  const used = a.assigned.reduce((s, t) => s + t.duration, 0);
-  const slack = Math.max(0, WEEK_SECONDS - used);
-  const gap = Math.floor(slack / n);
-  const offset = phaseOffset(a.id);
+  const G = TIME_GRANULARITY;
+  const totalSlots = Math.floor(WEEK_SECONDS / G); // 672
+  const durSlots = a.assigned.map((t) => Math.ceil(t.duration / G)); // footprint per flight
+  const usedSlots = durSlots.reduce((s, d) => s + d, 0);
+  const slackSlots = Math.max(0, totalSlots - usedSlots);
+  const gap = Math.floor(slackSlots / n);
+  const offset = Math.floor(phaseOffset(a.id) / G) % totalSlots;
 
   const out: { takeOffTime: number; lineId: number }[] = [];
-  let t = 0;
-  for (const trip of a.assigned) {
-    out.push({ takeOffTime: (Math.round(t) + offset) % WEEK_SECONDS, lineId: trip.lineId });
-    t += trip.duration + gap;
+  let slot = 0;
+  for (let i = 0; i < n; i++) {
+    const takeoffSlot = (slot + offset) % totalSlots;
+    out.push({ takeOffTime: takeoffSlot * G, lineId: a.assigned[i].lineId }); // multiple of 900
+    slot += durSlots[i] + gap;
   }
   out.sort((x, y) => x.takeOffTime - y.takeOffTime);
   return out;

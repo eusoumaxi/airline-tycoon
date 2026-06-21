@@ -52,14 +52,22 @@ when the cookie expires, paste the new `-b '...'` value there.
 ### Your hubs (8, auto‑discovered)
 ADD · BOG · DXB · GRU · HKG · JFK · LAX · MIA → **~3,931 aircraft, ~2,310 routes**.
 
-### Which route belongs to which hub (key rule)
-A hub's `list` also returns **foreign** routes (that only touch the hub as the
-destination). A route is **owned by the hub only if `airportOneId == hubAirportId`**
-(the hub is the ORIGIN, the first code in the name):
-- Loading GRU → `GRU / ATM` is **owned** (origin GRU); `MIA / GRU` is **foreign**
-  (it's MIA's, only ends at GRU) and is **dropped**.
-So an aircraft only flies routes of ITS hub, plus **range** (`range ≥ distance`).
-Those two are the conditions in `canFly()`.
+### What an aircraft may fly — `canFly()` (3 hard rules)
+1. **Own hub**: a hub's `list` also returns **foreign** routes (that only touch
+   the hub as destination). A route is owned only if `airportOneId == hubAirportId`
+   (the hub is the ORIGIN, first code in the name). Loading GRU → `GRU / ATM` is
+   owned; `MIA / GRU` is MIA's and is dropped. An aircraft only flies its hub's routes.
+2. **Range**: `range ≥ distance` (one way).
+3. **Runway / airport size**: `line.category ≥ aircraft.category`. Bigger aircraft
+   need bigger airports — a small airport rejects them (*"l'avion a besoin de plus
+   grande pistes"*). Verified against every real flown pair. **If even one flight
+   breaks any rule, the game rejects the WHOLE aircraft update.**
+
+### takeOffTime granularity (15 min)
+Every `takeOffTime` must be a **multiple of 900 s** or the update is rejected
+(*"ne respecte pas la granularité… TakeOffTime % 900 != 0"*). The scheduler works
+on a 900 s grid and round-trip durations are rounded up to a whole slot, so flights
+never overlap or over-subscribe the week.
 
 ### Demand (confirmed DAILY)
 `paxAttEco/Bus/First/Cargo` is **per‑day** demand (the game's "REMAINING DEMAND"
@@ -124,6 +132,12 @@ re‑running it is a full **reload**, handy after you buy new routes or aircraft
 - **Scope**: `APPLY_HUBS` in config (currently `["GRU"]`) or `--hub <CODE>`.
 - **Random 5–10 s delay** between each aircraft update (`MIN_DELAY_MS` /
   `MAX_DELAY_MS`) — looks human and avoids rate limits.
+- The update **replaces** that aircraft's whole planning (not additive). The game
+  answers `{"result":true}` on success or a plain-text reason on rejection; both
+  are checked, so a rejected aircraft is reported as `✗ FAIL` with the reason.
+
+> **Verified live on GRU**: all 4 aircraft applied (131 flights), categories valid,
+> 900 s grid, no overlap. Re-fetching confirms the planning matches what was sent.
 
 ```bash
 bun run apply               # dry run, GRU

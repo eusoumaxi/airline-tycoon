@@ -102,5 +102,20 @@ export async function updatePlanning(plan: AircraftPlan): Promise<unknown> {
     body: `planningData=${encodeURIComponent(planningData)}`,
   });
   if (!res.ok) throw new Error(`POST ${url} -> ${res.status} ${res.statusText}`);
-  return res.json().catch(() => ({}));
+
+  // The game returns {"result":true,"message":"..."} on success, or a plain-text
+  // error ("Su planning no se añadió a causa del error siguiente: ...") on
+  // rejection — even with HTTP 200. Detect both so a rejection is a real failure.
+  const text = await res.text();
+  let ok: boolean;
+  let message = text.trim();
+  try {
+    const j = JSON.parse(text);
+    ok = j?.result === true;
+    if (j?.message) message = j.message;
+  } catch {
+    ok = !/no se a|n'a pas|error|granularit|piste|d[eé]coller/i.test(text);
+  }
+  if (!ok) throw new Error(message.slice(0, 220));
+  return message;
 }

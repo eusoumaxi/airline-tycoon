@@ -1,4 +1,4 @@
-import { DEFAULT_TURNAROUND, DEMAND_DAYS, PRICING, WEEK_SECONDS } from "./config.ts";
+import { DEFAULT_TURNAROUND, DEMAND_DAYS, PRICING, TIME_GRANULARITY, WEEK_SECONDS } from "./config.ts";
 import type {
   Aircraft,
   CabinClass,
@@ -28,9 +28,16 @@ function inferTurnaround(a: RawAircraft): number {
   return Math.round(samples[Math.floor(samples.length / 2)]); // median
 }
 
-/** Round-trip duration (s) of a specific aircraft on a specific line. */
+/**
+ * Round-trip duration (s) of a specific aircraft on a specific line, rounded UP
+ * to a whole TIME_GRANULARITY slot. The game schedules on a 900 s grid, so a
+ * flight effectively occupies its time rounded up to the next slot boundary;
+ * using this everywhere keeps packing consistent with the schedule (no overlap,
+ * no over-subscription).
+ */
 export function roundTripDuration(a: Aircraft, line: RawLine): number {
-  return Math.round(flightTime(line.distance, a.speed) + a.turnaround);
+  const raw = flightTime(line.distance, a.speed) + a.turnaround;
+  return Math.ceil(raw / TIME_GRANULARITY) * TIME_GRANULARITY;
 }
 
 /** Max number of round trips that fit in the week for that aircraft/line. */
@@ -44,13 +51,17 @@ export function reaches(a: RawAircraft, line: RawLine): boolean {
 }
 
 /**
- * Can this aircraft fly this route? Two hard conditions:
+ * Can this aircraft fly this route? Three hard conditions:
  *   1. Same hub: the route must depart from the aircraft's hub (aircraft.hubId).
  *      A BOG aircraft cannot fly a GRU route, etc.
  *   2. Range: range >= distance (one way).
+ *   3. Runway/airport size: line.category >= aircraft.category. Bigger aircraft
+ *      (higher category) need bigger airports; a small airport (low category)
+ *      rejects them ("needs larger runways"). Verified: holds for every real
+ *      flown pair. If any flight breaks this, the game rejects the WHOLE update.
  */
 export function canFly(a: Aircraft, line: Line): boolean {
-  return a.hubId === line.hubId && a.range >= line.distance;
+  return a.hubId === line.hubId && a.range >= line.distance && line.category >= a.category;
 }
 
 /** Price per seat/ton (one way) as a function of distance. */

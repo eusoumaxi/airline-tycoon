@@ -55,6 +55,13 @@ export const WEEK_SECONDS = 604800;
 /** Default turnaround (s) when it can't be inferred from the aircraft. ~7600 measured. */
 export const DEFAULT_TURNAROUND = 7600;
 
+/**
+ * Planning time granularity (s). The game requires every takeOffTime to be a
+ * multiple of this (15 min) — otherwise the whole update is rejected
+ * ("ne respecte pas la granularité du planning, TakeOffTime % 900 != 0").
+ */
+export const TIME_GRANULARITY = 900;
+
 // ───────────────────────────────────────────────────────────────────────────
 // Economic model parameters — TUNE to the game's audit.
 // The optimizer is robust to scale: these weights set the RELATIVE value order
