@@ -7,34 +7,34 @@ const fmt = (n: number) => n.toLocaleString("en-US", { maximumFractionDigits: 0 
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
 const money = (n: number) => `€${fmt(n)}`;
 
-/** Flota indexada por id. */
+/** Fleet indexed by id. */
 export type FleetIndex = Map<number, Aircraft>;
 
 export interface Metrics {
-  /** Utilizacion media de los aviones que vuelan. */
+  /** Average utilization of the flying aircraft. */
   fleetUtil: number;
-  /** Utilizacion minima / percentil 10 / maxima. */
+  /** Minimum / p10 / maximum utilization. */
   utilMin: number;
   utilP10: number;
   utilMax: number;
-  /** Aviones con utilizacion >= 99%. */
+  /** Aircraft with utilization >= 99%. */
   near100: number;
-  /** Aviones con al menos un vuelo. */
+  /** Aircraft with at least one flight. */
   flying: number;
-  /** Aviones SIN USAR (0 vuelos). */
+  /** UNUSED aircraft (0 flights). */
   idle: number;
   totalFlights: number;
-  /** Valor semanal servido (demanda-capada) en €. */
+  /** Weekly served value (demand-capped) in €. */
   servedValue: number;
-  /** Cobertura de demanda por clase: servido / demanda. */
+  /** Demand coverage per class: served / demand. */
   coverage: Record<CabinClass, { offered: number; demand: number; served: number }>;
-  /** Oferta por linea (para medir sobreoferta por ruta). */
+  /** Offer per line (to measure per-route oversupply). */
   perLine: Map<number, Record<CabinClass, number>>;
 }
 
 /**
- * Calcula metricas para un conjunto de vuelos (lista de lineId por avion).
- * Sirve tanto para el estado ACTUAL como para el PROPUESTO.
+ * Compute metrics for a set of flights (list of lineIds per aircraft).
+ * Works for both the CURRENT state and the PROPOSED one.
  */
 export function computeMetrics(
   flightsByAircraft: { aircraftId: number; lineIds: number[] }[],
@@ -112,9 +112,9 @@ export function computeMetrics(
 
 const hr = (c = "─") => c.repeat(78);
 
-/** Analisis de rutas: demanda y valor potencial por linea. */
+/** Route analysis: demand and potential value per line. */
 export function printRouteAnalysis(lines: Map<number, Line>): void {
-  console.log(`\n${hr("═")}\n  ANALISIS DE RUTAS (${lines.size} lineas)  ·  demanda x${DEMAND_DAYS} dias\n${hr("═")}`);
+  console.log(`\n${hr("═")}\n  ROUTE ANALYSIS (${lines.size} routes)  ·  demand x${DEMAND_DAYS} days\n${hr("═")}`);
   const arr = [...lines.values()].map((l) => {
     const value =
       l.weeklyDemand.eco * l.price.eco +
@@ -125,9 +125,9 @@ export function printRouteAnalysis(lines: Map<number, Line>): void {
   });
   arr.sort((a, b) => b.value - a.value);
   console.log(
-    `  ${"linea".padEnd(13)} ${"cat".padStart(3)} ${"dist".padStart(6)} ` +
+    `  ${"route".padEnd(13)} ${"cat".padStart(3)} ${"dist".padStart(6)} ` +
       `${"demEco".padStart(7)} ${"demBus".padStart(6)} ${"demFst".padStart(6)} ${"demCgo".padStart(6)} ` +
-      `${"valor/sem".padStart(12)}`,
+      `${"value/wk".padStart(12)}`,
   );
   console.log(`  ${hr("─").slice(2)}`);
   for (const { l, value } of arr.slice(0, 20)) {
@@ -138,19 +138,19 @@ export function printRouteAnalysis(lines: Map<number, Line>): void {
         `${money(value).padStart(12)}`,
     );
   }
-  if (arr.length > 20) console.log(`  ... y ${arr.length - 20} lineas mas`);
+  if (arr.length > 20) console.log(`  ... and ${arr.length - 20} more routes`);
 }
 
-/** Analisis de flota: resumen por modelo. */
+/** Fleet analysis: summary by model. */
 export function printFleetAnalysis(aircraft: Aircraft[]): void {
-  console.log(`\n${hr("═")}\n  ANALISIS DE FLOTA (${aircraft.length} aviones)\n${hr("═")}`);
+  console.log(`\n${hr("═")}\n  FLEET ANALYSIS (${aircraft.length} aircraft)\n${hr("═")}`);
   const byModel = new Map<string, Aircraft[]>();
   for (const a of aircraft) {
     const k = a.aircraftListName;
     (byModel.get(k) ?? byModel.set(k, []).get(k)!).push(a);
   }
   console.log(
-    `  ${"modelo".padEnd(12)} ${"n".padStart(4)} ${"eco".padStart(5)} ${"bus".padStart(5)} ` +
+    `  ${"model".padEnd(12)} ${"n".padStart(4)} ${"eco".padStart(5)} ${"bus".padStart(5)} ` +
       `${"fst".padStart(4)} ${"cargo".padStart(6)} ${"range".padStart(7)} ${"speed".padStart(6)} ${"util".padStart(6)}`,
   );
   console.log(`  ${hr("─").slice(2)}`);
@@ -165,10 +165,9 @@ export function printFleetAnalysis(aircraft: Aircraft[]): void {
   }
 }
 
-/** Resumen por hub del plan propuesto (util, rutas, sobreoferta). */
+/** Per-hub summary of the proposed plan (util, routes, oversupply). */
 export function printHubSummary(aircraft: Aircraft[], lines: Map<number, Line>): void {
-  console.log(`\n${hr("═")}\n  RESUMEN POR HUB (propuesto)\n${hr("═")}`);
-  // codigo del hub = prefijo del nombre de cualquiera de sus rutas ("BOG / CCS")
+  console.log(`\n${hr("═")}\n  PER-HUB SUMMARY (proposed)\n${hr("═")}`);
   const hubCode = new Map<number, string>();
   const hubRoutes = new Map<number, number>();
   for (const l of lines.values()) {
@@ -186,7 +185,6 @@ export function printHubSummary(aircraft: Aircraft[], lines: Map<number, Line>):
     g.flights += a.assigned.length;
     byHub.set(a.hubId, g);
   }
-  // sobreoferta pax por hub (de la demanda restante final)
   for (const l of lines.values()) {
     const g = byHub.get(l.hubId);
     if (!g) continue;
@@ -194,54 +192,56 @@ export function printHubSummary(aircraft: Aircraft[], lines: Map<number, Line>):
   }
 
   console.log(
-    `  ${"hub".padEnd(5)} ${"aviones".padStart(7)} ${"rutas".padStart(6)} ${"util".padStart(7)} ${"vuelos".padStart(7)} ${"sobreofer.pax".padStart(14)}`,
+    `  ${"hub".padEnd(5)} ${"aircraft".padStart(8)} ${"routes".padStart(6)} ${"util".padStart(7)} ${"flights".padStart(7)} ${"pax oversupply".padStart(14)}`,
   );
   console.log(`  ${hr("─").slice(2)}`);
   for (const [hubId, g] of [...byHub.entries()].sort((a, b) => b[1].planes - a[1].planes)) {
     console.log(
-      `  ${(hubCode.get(hubId) ?? String(hubId)).padEnd(5)} ${String(g.planes).padStart(7)} ` +
+      `  ${(hubCode.get(hubId) ?? String(hubId)).padEnd(5)} ${String(g.planes).padStart(8)} ` +
         `${String(hubRoutes.get(hubId) ?? 0).padStart(6)} ${pct(g.planes ? g.utilSum / g.planes : 0).padStart(7)} ` +
         `${fmt(g.flights).padStart(7)} ${fmt(Math.round(g.over)).padStart(14)}`,
     );
   }
 }
 
-/** Compara metricas ACTUAL vs PROPUESTO. */
+/** Compare CURRENT vs PROPOSED metrics. */
 export function printComparison(before: Metrics, after: Metrics): void {
-  console.log(`\n${hr("═")}\n  RESULTADO: ACTUAL  ->  PROPUESTO\n${hr("═")}`);
+  console.log(`\n${hr("═")}\n  RESULT: CURRENT  ->  PROPOSED\n${hr("═")}`);
   const row = (label: string, b: string, a: string) =>
     console.log(`  ${label.padEnd(26)} ${b.padStart(16)}   ->  ${a.padStart(16)}`);
-  row("Aviones volando", String(before.flying), String(after.flying));
-  row("Aviones SIN USAR", String(before.idle), String(after.idle));
-  row("Vuelos / semana", fmt(before.totalFlights), fmt(after.totalFlights));
-  row("Utilizacion media", pct(before.fleetUtil), pct(after.fleetUtil));
-  row("Utilizacion minima", pct(before.utilMin), pct(after.utilMin));
-  row("Utilizacion p10 (peor 10%)", pct(before.utilP10), pct(after.utilP10));
-  row("Aviones >= 99% util", `${before.near100}/${before.flying}`, `${after.near100}/${after.flying}`);
-  row("Valor servido / semana", money(before.servedValue), money(after.servedValue));
+  row("Flying aircraft", String(before.flying), String(after.flying));
+  row("UNUSED aircraft", String(before.idle), String(after.idle));
+  row("Flights / week", fmt(before.totalFlights), fmt(after.totalFlights));
+  row("Average utilization", pct(before.fleetUtil), pct(after.fleetUtil));
+  row("Minimum utilization", pct(before.utilMin), pct(after.utilMin));
+  row("p10 utilization (worst 10%)", pct(before.utilP10), pct(after.utilP10));
+  row("Aircraft >= 99% util", `${before.near100}/${before.flying}`, `${after.near100}/${after.flying}`);
+  row("Served value / week", money(before.servedValue), money(after.servedValue));
   console.log(`  ${hr("─").slice(2)}`);
-  console.log(`  Cobertura de demanda (servido / demanda):`);
+  console.log(`  Demand coverage (served / demand):`);
   for (const c of CLASSES) {
     const b = before.coverage[c];
     const a = after.coverage[c];
     const bc = b.demand ? b.served / b.demand : 0;
     const ac = a.demand ? a.served / a.demand : 0;
     console.log(
-      `    ${c.toUpperCase().padEnd(6)} ${pct(bc).padStart(7)} (${fmt(b.offered).padStart(8)} ofr) ` +
-        `->  ${pct(ac).padStart(7)} (${fmt(a.offered).padStart(8)} ofr)  · demanda ${fmt(a.demand)}`,
+      `    ${c.toUpperCase().padEnd(6)} ${pct(bc).padStart(7)} (${fmt(b.offered).padStart(8)} off) ` +
+        `->  ${pct(ac).padStart(7)} (${fmt(a.offered).padStart(8)} off)  · demand ${fmt(a.demand)}`,
     );
   }
   const delta = after.servedValue - before.servedValue;
   console.log(`  ${hr("─").slice(2)}`);
-  console.log(`  Δ Valor servido: ${delta >= 0 ? "+" : ""}${money(delta)} / semana`);
+  console.log(`  Δ Served value: ${delta >= 0 ? "+" : ""}${money(delta)} / week`);
 }
 
+const signed = (n: number) => (n >= 0 ? `+${fmt(n)}` : fmt(n));
+
 /**
- * Sobreoferta por ruta (oferta - demanda). Muestra las rutas mas "negativas"
- * para verificar que ninguna se dispara, y cuanta demanda eco queda libre.
+ * Per-route oversupply (offer − demand). Shows the most "negative" routes to
+ * check none blows up, and how much eco demand is left free.
  */
 export function printOversupply(after: Metrics, lines: Map<number, Line>, n = 12): void {
-  console.log(`\n${hr("═")}\n  SOBREOFERTA POR RUTA (oferta − demanda)  ·  control de "no tan negativo"\n${hr("═")}`);
+  console.log(`\n${hr("═")}\n  OVERSUPPLY PER ROUTE (offer − demand)  ·  "not too negative" check\n${hr("═")}`);
   const rows = [...lines.values()].map((l) => {
     const off = after.perLine.get(l.id) ?? { eco: 0, bus: 0, first: 0, cargo: 0 };
     const over = (c: CabinClass) => off[c] - l.weeklyDemand[c];
@@ -250,8 +250,8 @@ export function printOversupply(after: Metrics, lines: Map<number, Line>, n = 12
   });
 
   const most = [...rows].filter((r) => r.totalOver > 0).sort((a, b) => b.totalOver - a.totalOver);
-  console.log(`  Mas sobre-ofertadas (asientos por encima de demanda eco/bus/fst):`);
-  if (most.length === 0) console.log("    (ninguna ruta sobre-ofertada)");
+  console.log(`  Most oversupplied (seats above eco/bus/first demand):`);
+  if (most.length === 0) console.log("    (no oversupplied route)");
   for (const r of most.slice(0, n)) {
     console.log(
       `    ${r.l.name.padEnd(13)} eco ${signed(r.over("eco")).padStart(7)}  bus ${signed(r.over("bus")).padStart(6)}  ` +
@@ -265,14 +265,12 @@ export function printOversupply(after: Metrics, lines: Map<number, Line>, n = 12
     .sort((a, b) => b.ecoFree - a.ecoFree);
   const freeTotal = free.reduce((s, r) => s + r.ecoFree, 0);
   console.log(`  ${hr("─").slice(2)}`);
-  console.log(`  Demanda ECO sin cubrir: ${fmt(freeTotal)} asientos en ${free.length} rutas (hay sitio para mas aviones).`);
+  console.log(`  Uncovered ECO demand: ${fmt(freeTotal)} seats across ${free.length} routes (room for more aircraft).`);
 }
 
-const signed = (n: number) => (n >= 0 ? `+${fmt(n)}` : fmt(n));
-
-/** Detalle por avion del plan propuesto (primeros N). */
+/** Per-aircraft detail of the proposed plan (first N). */
 export function printPlanSample(plans: AircraftPlan[], fleet: FleetIndex, lines: Map<number, Line>, n = 12): void {
-  console.log(`\n${hr("═")}\n  PLAN PROPUESTO — muestra de ${Math.min(n, plans.length)} aviones\n${hr("═")}`);
+  console.log(`\n${hr("═")}\n  PROPOSED PLAN — sample of ${Math.min(n, plans.length)} aircraft\n${hr("═")}`);
   for (const plan of plans.slice(0, n)) {
     const a = fleet.get(plan.aircraftId);
     if (!a) continue;
@@ -287,7 +285,7 @@ export function printPlanSample(plans: AircraftPlan[], fleet: FleetIndex, lines:
     }, 0);
     console.log(
       `  ${a.name.padEnd(12)} ${a.aircraftListName.padEnd(10)} ` +
-        `${String(plan.added.length).padStart(2)} vuelos  util ${pct(Math.min(1, used / WEEK_SECONDS)).padStart(6)}  ${desc}`,
+        `${String(plan.added.length).padStart(2)} flights  util ${pct(Math.min(1, used / WEEK_SECONDS)).padStart(6)}  ${desc}`,
     );
   }
 }

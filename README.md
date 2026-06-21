@@ -1,170 +1,195 @@
-# Airline Tycoon — Optimizador de Slots
+# Airline Tycoon — Slot Optimizer
 
-Sistema automático en **TypeScript + Bun** que descarga tu planning de
-`tycoon.airlines-manager.com`, analiza **todas las rutas** y **cada avión** de
-**todos tus hubs**, y calcula el **mejor reparto de slots** para tener los aviones
-lo **más ocupados posible** (utilización ≈ 100%) maximizando el valor servido,
-respetando qué avión puede volar qué ruta.
+Automatic tool (**TypeScript + Bun**) that downloads your planning from
+`tycoon.airlines-manager.com`, analyzes **every route** and **every aircraft**
+across **all your hubs**, and computes the **best slot allocation** to keep
+aircraft as busy as possible while **maximizing profit** (it won't fly money‑losing
+flights). It can then **apply** the plan back to the game, one aircraft at a time.
 
-> ⚠️ **No envía ningún cambio al juego.** Solo descarga (`list`) y calcula. El
-> `update` está implementado pero **nunca se llama**: revisas el plan y luego se
-> aplica cuando tú quieras.
+> Reading the game (`list`) and computing the plan never changes anything.
+> Pushing changes only happens when you explicitly run `apply --apply`.
 
 ---
 
-## 1. Cómo ejecutarlo
+## 1. Quick start
 
 ```bash
-bun install            # una vez
-bun run src/index.ts             # descubre tus hubs + descarga + optimiza + reporte
-bun run src/index.ts --offline   # usa el último JSON descargado (sin red)
-bun run src/index.ts --fetch-only# solo descarga y guarda el JSON
+bun install                         # once
+
+# Optimize (read-only) — analysis + proposed plan + HTML reports
+bun run optimize                    # discover hubs, download, optimize, report
+bun run offline                     # reuse the last downloaded JSON (no network)
+bun run src/index.ts --hub GRU      # only build the HTML report for one hub
+
+# Apply the plan to the game (push the updates)
+bun run apply                       # DRY RUN for the hub(s) in APPLY_HUBS (GRU) — sends nothing
+bun run apply --hub GRU             # DRY RUN for a chosen hub
+bun run apply:live                  # actually SEND the updates (live) for APPLY_HUBS
+bun run src/apply.ts --hub GRU --apply   # send live for a chosen hub
 ```
 
-Salidas:
-- Reporte por consola (análisis de rutas, flota, comparación, resumen por hub).
-- `.test/data/load_<id>.json` — copia cruda de cada hub.
-- `.test/data/proposed_plan.json` — **el plan propuesto**, ya en el formato del
-  `update` (lista de `{aircraftId, added:[{takeOffTime, lineId}]}`).
+Outputs (in `.test/data/`):
+- `load_<id>.json` — raw download per hub.
+- `proposed_plan.json` — the proposed plan, already in the update format
+  (`[{aircraftId, added:[{takeOffTime, lineId}]}]`).
+- `report_<CODE>.html` — self‑contained visual report per hub (see §6).
 
 ---
 
-## 2. La API del juego (de `.test/curl.md`)
+## 2. The game API (from `.test/curl.md`)
 
-| Acción | Endpoint | Uso aquí |
+| Action | Endpoint | Used here |
 |---|---|---|
-| **descubrir hubs** | `GET /network/planning` (HTML) | ✅ lee `data-hubId`/código/airportId de cada hub |
-| **list** | `GET /network/planning/load/<id>` | ✅ rutas + aviones de un hub |
-| **update** | `POST /network/planning/0/ajax` | ⛔ implementado, **no se llama** |
-| reconfigure | `POST /aircraft/show/<id>/reconfigure` | (futuro: cambiar asientos) |
+| **discover hubs** | `GET /network/planning` (HTML) | reads `data-hubId`/code/airportId of each hub |
+| **list** | `GET /network/planning/load/<id>` | routes + aircraft of a hub |
+| **update** | `POST /network/planning/0/ajax` | push one aircraft's planning (used by `apply`) |
+| reconfigure | `POST /aircraft/show/<id>/reconfigure` | (future: change seat layout) |
 
-Todo se hace replicando el curl **exactamente**, incluido el `User-Agent` tal cual
-(el juego lo valida). Credenciales (cookie + UA) en [`src/config.ts`](src/config.ts);
-cuando la cookie caduque, pega el nuevo valor `-b '...'` ahí.
+Everything replicates the curl **exactly**, including the `User-Agent` as‑is (the
+game validates it). Credentials (cookie + UA) live in [`src/config.ts`](src/config.ts);
+when the cookie expires, paste the new `-b '...'` value there.
 
-### Tus hubs (8, auto-descubiertos)
-ADD · BOG · DXB · GRU · HKG · JFK · LAX · MIA → **~3.931 aviones, ~2.310 rutas**.
+### Your hubs (8, auto‑discovered)
+ADD · BOG · DXB · GRU · HKG · JFK · LAX · MIA → **~3,931 aircraft, ~2,310 routes**.
 
-### ⚠️ Qué ruta es de qué hub (regla clave)
-El `list` de un hub también devuelve rutas **ajenas** (que solo tocan el hub como
-destino). Una ruta es **propia del hub solo si `airportOneId == hubAirportId`**
-(el hub es el ORIGEN, el primer código del nombre):
-- Cargando GRU → `GRU / ATM` es **propia** (origen GRU), `MIA / GRU` es **ajena**
-  (es de MIA, solo termina en GRU) y se **descarta**.
-Por eso un avión solo puede volar rutas de SU hub. Además: **alcance** (`range ≥
-distancia`). Esas dos son las condiciones de `canFly()`.
+### Which route belongs to which hub (key rule)
+A hub's `list` also returns **foreign** routes (that only touch the hub as the
+destination). A route is **owned by the hub only if `airportOneId == hubAirportId`**
+(the hub is the ORIGIN, the first code in the name):
+- Loading GRU → `GRU / ATM` is **owned** (origin GRU); `MIA / GRU` is **foreign**
+  (it's MIA's, only ends at GRU) and is **dropped**.
+So an aircraft only flies routes of ITS hub, plus **range** (`range ≥ distance`).
+Those two are the conditions in `canFly()`.
 
-### Demanda (confirmada DIARIA)
-`paxAttEco/Bus/First/Cargo` es la demanda **por día** (la tabla "DEMANDA RESTANTE"
-del juego la muestra Lunes..Domingo y coincide con `paxAtt*`). Por eso la demanda
-semanal = `paxAtt × 7` (`DEMAND_DAYS`).
+### Demand (confirmed DAILY)
+`paxAttEco/Bus/First/Cargo` is **per‑day** demand (the game's "REMAINING DEMAND"
+table shows it Mon..Sun, matching `paxAtt*`). So weekly demand = `paxAtt × 7`
+(`DEMAND_DAYS`).
 
-### Mecánica de tiempo (calibrada con tus datos)
-- Semana de planning = **604.800 s** (7 días); `utilizationPercentage` = tiempo de
-  vuelo / semana (verificado: cálculo 91,7% ≈ juego). 
-- Duración ida+vuelta = `2·distancia/velocidad·3600 + turnaround` (~7.600 s,
-  medido por avión).
-- Aviones de pax llevan **carga** en bodega (`payloadUsed` t).
+### Time mechanics (calibrated from your data)
+- Planning week = **604,800 s** (7 days); `utilizationPercentage` = flight time /
+  week (verified: computed 91.7% ≈ game).
+- Round‑trip duration = `2·distance/speed·3600 + turnaround` (~7,600 s, measured
+  per aircraft).
+- Passenger aircraft also carry **cargo** in the belly (`payloadUsed` t).
 
 ---
 
-## 3. El algoritmo (`src/optimizer.ts`)
+## 3. The algorithm (`src/optimizer.ts`)
 
-Cada hub se optimiza por separado (son independientes; ningún avión cruza de hub).
+Each hub is optimized independently (no aircraft crosses hubs).
 
-### Valor de un vuelo = BENEFICIO (ingresos − coste)
-Volar asientos vacíos **pierde dinero** (combustible). Por eso el valor de un
-vuelo es su **beneficio**:
+### Flight value = PROFIT (revenue − cost)
+Flying empty seats **loses money** (fuel). So a flight's value is its **profit**:
 
 ```
-valor = Σ_clase min(asientos, demanda_restante)·precio  −  COST_PER_KM·distancia·2
+value = Σ_class min(seats, remaining_demand)·price  −  COST_PER_KM·distance·2
 ```
 
-Solo cuenta la **demanda real** que llenaría; los asientos que sobran vuelan
-vacíos y valen 0. Si `valor ≤ 0` (vuelo casi vacío) **NO se programa → el slot
-queda libre**. Así la sobreoferta se acota sola (al agotarse la demanda, los
-vuelos extra dejan de ser rentables) y *no se pierde plata en rutas sin
-necesidad*. Aviones que no tengan ningún vuelo rentable quedan **sin usar**.
+Only the **real demand** it fills earns; leftover seats fly empty and earn 0. If
+`value ≤ 0` (a near‑empty flight) it is **NOT scheduled → the slot is left free**.
+This caps oversupply on its own (once demand runs out, extra flights stop being
+profitable) and avoids losing money. Aircraft with no profitable flight are left
+**unused**.
 
-### Fase A — Greedy global por beneficio/segundo (heap lazy)
-Programa, vuelo a vuelo, el de mayor **beneficio por segundo** de la flota del
-hub, descontando demanda y tiempo. Usa una **cola de prioridad con invalidación
-perezosa** (los beneficios solo bajan al consumirse demanda) → rápido incluso
-con miles de aviones (~4 s los 8 hubs).
+### Phase A — Greedy by profit/second (lazy heap)
+Schedules, flight by flight, the highest **profit‑per‑second** of the hub fleet,
+subtracting demand and time. Uses a **priority queue with lazy invalidation**
+(profits only drop as demand is consumed) → fast even with thousands of aircraft
+(~4 s for all 8 hubs).
 
-### Fase B — Re-teselado (más beneficio sin huecos innecesarios)
-- **grow-swap**: cambia un vuelo por otro **más largo/rentable** que llene el hueco.
-- **gap-fill**: añade vuelos rentables que aún quepan.
+### Phase B — Tighten (more profit, less idle)
+- **grow‑swap**: replace a flight with a longer/more profitable one that fits the gap.
+- **gap‑fill**: add profitable flights that still fit.
 
-> Cargueros (`isCargo`, p.ej. 747-8F con 134 t y 0 asientos) se modelan igual: su
-> beneficio sale de la **carga**. Los aviones de pax llevan además carga en bodega.
+> Freighters (`isCargo`, e.g. 200× 747‑8F with 134 t and 0 seats) are modeled the
+> same: their profit comes from **cargo**. Passenger aircraft add belly cargo on top.
 
-### Horarios (slots)
-Los `takeOffTime` se reparten secuencialmente con la holgura distribuida →
-salidas regulares y **sin solapes** dentro de la semana.
+### Schedule (slots)
+`takeOffTime`s are spread with uniform slack plus a **per‑aircraft pseudo‑random
+phase offset** (deterministic): not everything starts Monday 00:00 — each aircraft
+begins at a different point of the week and aircraft on the same route are
+staggered. Uniform spread (~equal flights per day/hour), **no overlaps**; a flight
+may cross the weekend (the game allows it).
 
 ---
 
-## 4. Parámetros ajustables (`src/config.ts`)
+## 4. Apply / reload (`src/apply.ts`)
 
-| Parámetro | Qué hace | Default |
+`apply` re‑fetches, re‑optimizes and **pushes** the plan to the game — so
+re‑running it is a full **reload**, handy after you buy new routes or aircraft.
+
+- **Dry run by default** (`bun run apply`) — prints exactly what would be sent,
+  sends nothing. Add `--apply` to send live.
+- **Scope**: `APPLY_HUBS` in config (currently `["GRU"]`) or `--hub <CODE>`.
+- **Random 5–10 s delay** between each aircraft update (`MIN_DELAY_MS` /
+  `MAX_DELAY_MS`) — looks human and avoids rate limits.
+
+```bash
+bun run apply               # dry run, GRU
+bun run apply:live          # live, GRU
+```
+
+---
+
+## 5. Tunable parameters (`src/config.ts`)
+
+| Parameter | What it does | Default |
 |---|---|---|
-| `AUTO_DISCOVER_HUBS` | Descubre y optimiza todos los hubs. | `true` |
-| `DEMAND_DAYS` | Período de `paxAtt*` (diario → ×7). | `7` |
-| `PRICING` | Precio por asiento/tonelada = `base + perKm·distancia`. | aprox. AM |
-| `COST_PER_KM` | Coste del vuelo por km y sentido. ↑ = exige más ocupación (más slots libres). | `10` |
-| `MIN_FILL` | Ocupación pax mínima para volar (salvaguarda). | `0` |
-| `TIGHTEN_ROUNDS` | Rondas del re-teselado. | `4` |
+| `AUTO_DISCOVER_HUBS` | Discover and optimize all hubs. | `true` |
+| `APPLY_HUBS` | Hubs that `apply` pushes by default. | `["GRU"]` |
+| `MIN_DELAY_MS` / `MAX_DELAY_MS` | Random delay between aircraft updates. | `5000` / `10000` |
+| `DEMAND_DAYS` | Period of `paxAtt*` (daily → ×7). | `7` |
+| `PRICING` | Price per seat/ton = `base + perKm·distance`. | approx. AM |
+| `COST_PER_KM` | Flight cost per km/leg. ↑ = demand higher load (more free slots). | `10` |
+| `MIN_FILL` | Minimum pax load factor to fly (safeguard). | `0` |
+| `TIGHTEN_ROUNDS` | Tighten passes. | `4` |
 
-> **`COST_PER_KM` es el mando clave**: subirlo deja más slots libres (no vuela
-> vuelos poco llenos); bajarlo vuela más. Va emparejado con `PRICING` (ambos
-> aproximados, afinables al audit del juego); el reparto relativo es robusto a la
-> escala. La sobreoferta de **bus/first** en rutas de mucho eco son asientos
-> premium vacíos en vuelos *rentables por el eco* — no pierden plata; se quitan
-> con **reconfigure** (menos asientos premium), no con slots.
+> `COST_PER_KM` is the key knob: raise it to leave more slots free (won't fly
+> poorly‑filled flights); lower it to fly more. It pairs with `PRICING` (both
+> approximate, tune to the game's audit); the relative allocation is robust to scale.
+> Leftover **bus/first** on eco‑heavy routes are empty premium seats on flights
+> that are **profitable from eco** — they don't lose money; remove them with
+> **reconfigure** (fewer premium seats), not with slots.
 
 ---
 
-## 5. Resultados (8 hubs · 3.931 aviones · ~2.310 rutas)
+## 6. HTML report per hub
 
-| Métrica | ACTUAL | PROPUESTO |
+`bun run src/index.ts --hub BOG` writes `report_BOG.html` (self‑contained):
+summary cards, **unused aircraft**, and per aircraft a **collapsible game‑style
+weekly grid** (Mon→Sun × 0‑23 h, each flight a block in the route's real color).
+Expanding an aircraft shows **● Current vs ● Proposed** side by side (the
+transition). Includes expand/collapse‑all buttons and an aircraft/route filter.
+
+---
+
+## 7. Results (8 hubs · 3,931 aircraft · ~2,310 routes)
+
+| Metric | CURRENT | PROPOSED |
 |---|---|---|
-| Utilización media | 91,7% | **99,8%** |
-| Aviones volando | 3.509 | **3.930 / 3.931** |
-| Aviones **sin usar** | 422 | **1** (el B727, sin ruta rentable) |
-| Valor servido/semana | €47,1 B | **€65,7 B (+€18,6 B)** |
-| Violaciones de hub | — | **0** |
+| Average utilization | 91.7% | **99.8%** |
+| Flying aircraft | 3,509 | **3,930 / 3,931** |
+| **Unused** aircraft | 422 | **1** (the B727, no profitable route) |
+| Served value/week | €47.1 B | **€65.7 B (+€18.6 B)** |
+| Hub violations | — | **0** |
 
-Cada hub queda en **99%+** de utilización **rentable**. Donde no hay vuelo
-rentable (demanda agotada / avión limitado por alcance) el slot queda **libre**
-en vez de perder plata. La sobreoferta de pax desaparece; los asientos premium
-vacíos en rutas de mucho eco son de *reconfigure*, no de slots.
-
-### Artefacto HTML por hub
-`bun run src/index.ts --hub BOG` genera `report_BOG.html` (autocontenido):
-tarjetas de resumen, **aviones sin usar**, y por avión una **rejilla semanal
-colapsable tipo el juego** (Lun→Dom × 0-23 h, cada vuelo un bloque del color real
-de la ruta) con botones desplegar/colapsar y filtro.
+Where there is no profitable flight (demand exhausted / range‑limited aircraft)
+the slot is left **free** instead of losing money.
 
 ---
 
-## 6. Aplicar el plan (más adelante)
-
-Recorre `proposed_plan.json` y llama por avión a `updatePlanning(plan)` de
-[`src/api.ts`](src/api.ts) (un POST por avión). **Hoy esto no se ejecuta.**
-
----
-
-## 7. Estructura
+## 8. Project layout
 
 ```
 src/
-  config.ts     credenciales (cookie/UA) + parámetros del modelo
-  types.ts      tipos del dominio (hub, rutas, aviones, plan)
-  api.ts        descubrir hubs + fetch del list (curl exacto) + updatePlanning (NO se llama)
-  model.ts      hub de cada ruta, canFly (hub+alcance), duraciones, precios, demanda
-  optimizer.ts  algoritmo: beneficio (ingresos−coste) + greedy (heap lazy) + re-teselado
-  report.ts     análisis de rutas/flota, comparación, resumen por hub, aviones sin usar
-  html.ts       artefacto HTML por hub (rejilla semanal colapsable tipo el juego)
-  index.ts      orquestación: descubre → descarga → analiza → optimiza → reporta (+HTML)
+  config.ts     credentials (cookie/UA) + model & apply parameters
+  types.ts      domain types (hub, routes, aircraft, plan)
+  api.ts        discover hubs + list fetch (exact curl) + updatePlanning
+  model.ts      route ownership, canFly (hub+range), durations, pricing, demand
+  optimizer.ts  profit model + greedy (lazy heap) + tighten + scheduling
+  report.ts     route/fleet analysis, comparison, per-hub summary, unused aircraft
+  html.ts       per-hub HTML artifact (collapsible game-style weekly grid)
+  index.ts      orchestration: discover → download → analyze → optimize → report (+HTML)
+  apply.ts      push the plan to the game (dry-run default, random delay, reload)
 ```

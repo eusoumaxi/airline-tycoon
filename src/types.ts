@@ -1,53 +1,53 @@
 // ───────────────────────────────────────────────────────────────────────────
-// Tipos del dominio (respuesta de /network/planning/load/<id>)
+// Domain types (response of /network/planning/load/<id>)
 // ───────────────────────────────────────────────────────────────────────────
 
-/** Una linea/ruta tal como la entrega la API. */
+/** A line/route as returned by the API. */
 export interface RawLine {
   id: number;
   name: string; // "BOG / CCS"
-  airportOneId: number;
-  airportTwoId: number;
-  distance: number; // km (un sentido)
-  baseDuration: number; // s, referencia del juego
+  airportOneId: number; // origin (the hub, for routes owned by this hub)
+  airportTwoId: number; // destination
+  distance: number; // km (one way)
+  baseDuration: number; // s, game reference
   category: number; // 1..10
-  paxAttEco: number; // pax esperados ECO  (ver DEMAND_DAYS para el periodo)
-  paxAttBus: number; // pax esperados BUS
-  paxAttFirst: number; // pax esperados FIRST
-  paxAttCargo: number; // demanda de carga
+  paxAttEco: number; // expected eco pax  (see DEMAND_DAYS for the period)
+  paxAttBus: number; // expected business pax
+  paxAttFirst: number; // expected first pax
+  paxAttCargo: number; // cargo demand
   color: string;
 }
 
-/** Un vuelo dentro del planning semanal de un avion. */
+/** One flight inside an aircraft's weekly planning. */
 export interface PlanningSlot {
-  takeOffTime: number; // s desde el inicio de la semana (0..604800)
+  takeOffTime: number; // s from the start of the week (0..604800)
   lineId: number;
   aircraftId: number;
 }
 
-/** Un avion tal como lo entrega la API. */
+/** An aircraft as returned by the API. */
 export interface RawAircraft {
   id: number;
   name: string;
-  hubId: number;
+  hubId: number; // home hub airportId (only flies routes owned by this hub)
   category: number;
-  range: number; // km (alcance, un sentido)
+  range: number; // km (one way)
   isRental: boolean;
-  isCargo: boolean;
+  isCargo: boolean; // freighter (0 seats, all payload)
   seatsEco: number;
   seatsBus: number;
   seatsFirst: number;
-  payloadUsed: number; // toneladas de carga (bodega) por vuelo
+  payloadUsed: number; // cargo (belly / freighter) capacity in tons
   consumption: number;
-  utilizationPercentage: number; // % de tiempo de la semana ya ocupado
-  aircraftListName: string; // modelo, "A350-1000"
+  utilizationPercentage: number; // % of the week already busy
+  aircraftListName: string; // model, "A350-1000"
   picture: string;
   speed: number; // km/h
   planningList: PlanningSlot[];
   lineList: Record<string, { name: string; color: string; distance: number; duration: number }>;
 }
 
-/** Respuesta completa del endpoint de carga del planning. */
+/** Full response of the planning-load endpoint. */
 export interface PlanningPayload {
   hubAirportId: number;
   lineDataArray: RawLine[];
@@ -55,54 +55,54 @@ export interface PlanningPayload {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Tipos del modelo enriquecido (lo que usa el optimizador)
+// Enriched model types (used by the optimizer)
 // ───────────────────────────────────────────────────────────────────────────
 
 export type CabinClass = "eco" | "bus" | "first" | "cargo";
 
-/** Un hub (base) descubierto desde la pagina de planning. */
+/** A hub (base) discovered from the planning page. */
 export interface Hub {
-  loadId: number; // id para /network/planning/load/<loadId>
+  loadId: number; // id for /network/planning/load/<loadId>
   code: string; // "BOG"
-  airportId: number; // 156  (== hubAirportId del payload y aircraft.hubId)
+  airportId: number; // 156  (== payload.hubAirportId and aircraft.hubId)
 }
 
 export interface Line extends RawLine {
   /**
-   * Hub propietario de la ruta (== airportOneId == aircraft.hubId que la vuela).
-   * El endpoint de un hub tambien devuelve rutas AJENAS (donde el hub es el
-   * destino, airportTwoId); esas se descartan al construir el modelo.
+   * Owning hub of the route (== airportOneId == aircraft.hubId that may fly it).
+   * A hub's endpoint also returns FOREIGN routes (where the hub is the
+   * destination, airportTwoId); those are dropped when building the model.
    */
   hubId: number;
-  /** Demanda semanal restante por clase (se va consumiendo en el optimizador). */
+  /** Weekly remaining demand per class (consumed by the optimizer). */
   remaining: Record<CabinClass, number>;
-  /** Demanda semanal total por clase (constante de referencia). */
+  /** Total weekly demand per class (constant reference). */
   weeklyDemand: Record<CabinClass, number>;
-  /** Asientos ya sobre-ofertados por clase (por encima de la demanda). */
+  /** Seats already oversupplied per class (above demand). */
   over: Record<CabinClass, number>;
-  /** Precio estimado por asiento/tonelada (un sentido) segun distancia. */
+  /** Estimated price per seat/ton (one way) by distance. */
   price: Record<CabinClass, number>;
 }
 
-/** Un vuelo ya asignado a un avion, con su aporte para poder des-asignarlo. */
+/** A flight already assigned to an aircraft, with its contribution (to undo it). */
 export interface AssignedTrip {
   lineId: number;
   duration: number;
-  within: Record<CabinClass, number>; // asientos servidos dentro de demanda
-  over: Record<CabinClass, number>; // asientos sobre-ofertados
-  value: number; // valor del vuelo al asignarlo
+  within: Record<CabinClass, number>; // seats served within demand
+  over: Record<CabinClass, number>; // oversupplied seats
+  value: number; // flight value (profit) when assigned
 }
 
 export interface Aircraft extends RawAircraft {
-  /** Turnaround inferido para este avion (s). */
+  /** Turnaround inferred for this aircraft (s). */
   turnaround: number;
-  /** Tiempo libre restante en la semana (s). */
+  /** Remaining free time in the week (s). */
   freeTime: number;
-  /** Vuelos asignados por el optimizador (en orden). */
+  /** Flights assigned by the optimizer (in order). */
   assigned: AssignedTrip[];
 }
 
-/** Resultado: un slot propuesto para un avion (formato listo para el update). */
+/** Result: a proposed flight for an aircraft (ready for the update format). */
 export interface ProposedFlight {
   takeOffTime: number;
   lineId: number;

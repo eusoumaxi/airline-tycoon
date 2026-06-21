@@ -8,14 +8,14 @@ import type {
   RawLine,
 } from "./types.ts";
 
-/** Tiempo de vuelo puro ida+vuelta (s) de un avion segun su velocidad. */
+/** Pure round-trip flight time (s) of an aircraft given its speed. */
 function flightTime(distanceKm: number, speedKmh: number): number {
   return (2 * distanceKm) / speedKmh * 3600;
 }
 
 /**
- * Infere el turnaround real del avion a partir de sus rutas ya asignadas
- * (duration = tiempo de vuelo + turnaround). Si no tiene rutas, usa el default.
+ * Infer the aircraft's real turnaround from its already-assigned routes
+ * (duration = flight time + turnaround). Falls back to the default if it has none.
  */
 function inferTurnaround(a: RawAircraft): number {
   const samples: number[] = [];
@@ -25,51 +25,51 @@ function inferTurnaround(a: RawAircraft): number {
   }
   if (samples.length === 0) return DEFAULT_TURNAROUND;
   samples.sort((x, y) => x - y);
-  return Math.round(samples[Math.floor(samples.length / 2)]); // mediana
+  return Math.round(samples[Math.floor(samples.length / 2)]); // median
 }
 
-/** Duracion ida+vuelta (s) de un avion concreto en una linea concreta. */
+/** Round-trip duration (s) of a specific aircraft on a specific line. */
 export function roundTripDuration(a: Aircraft, line: RawLine): number {
   return Math.round(flightTime(line.distance, a.speed) + a.turnaround);
 }
 
-/** Maximo de vuelos (ida+vuelta) que caben en la semana para ese avion/linea. */
+/** Max number of round trips that fit in the week for that aircraft/line. */
 export function maxTripsByTime(a: Aircraft, line: RawLine): number {
   return Math.floor(WEEK_SECONDS / roundTripDuration(a, line));
 }
 
-/** ¿El avion alcanza la linea? (alcance >= distancia de un sentido). */
+/** Does the aircraft reach the line? (range >= one-way distance). */
 export function reaches(a: RawAircraft, line: RawLine): boolean {
   return a.range >= line.distance;
 }
 
 /**
- * ¿Este avion PUEDE volar esta ruta? Dos condiciones duras:
- *   1. Mismo hub: la ruta debe salir del hub del avion (aircraft.hubId).
- *      Un avion de BOG no puede volar una ruta de GRU, etc.
- *   2. Alcance: range >= distancia (un sentido).
+ * Can this aircraft fly this route? Two hard conditions:
+ *   1. Same hub: the route must depart from the aircraft's hub (aircraft.hubId).
+ *      A BOG aircraft cannot fly a GRU route, etc.
+ *   2. Range: range >= distance (one way).
  */
 export function canFly(a: Aircraft, line: Line): boolean {
   return a.hubId === line.hubId && a.range >= line.distance;
 }
 
-/** Precio por asiento/tonelada (un sentido) en funcion de la distancia. */
+/** Price per seat/ton (one way) as a function of distance. */
 function priceFor(cls: CabinClass, distanceKm: number): number {
   const p = PRICING[cls];
   return p.base + p.perKm * distanceKm;
 }
 
-/** Capacidad de un avion por clase (asientos / toneladas de carga por vuelo). */
+/** Aircraft capacity per class (seats / cargo tons per flight). */
 export function capacityOf(a: RawAircraft): Record<CabinClass, number> {
   return {
     eco: a.seatsEco,
     bus: a.seatsBus,
     first: a.seatsFirst,
-    cargo: a.payloadUsed, // bodega disponible (toneladas)
+    cargo: a.payloadUsed, // available cargo (tons)
   };
 }
 
-/** Construye el modelo enriquecido a partir de uno o varios payloads. */
+/** Build the enriched model from one or more payloads. */
 export function buildModel(payloads: PlanningPayload[]): {
   lines: Map<number, Line>;
   aircraft: Aircraft[];
@@ -79,8 +79,8 @@ export function buildModel(payloads: PlanningPayload[]): {
 
   for (const payload of payloads) {
     for (const raw of payload.lineDataArray) {
-      // Solo rutas PROPIAS del hub (origen == hub). El endpoint tambien trae
-      // rutas ajenas (p.ej. "MIA / GRU" al cargar GRU) que hay que descartar.
+      // Only routes OWNED by the hub (origin == hub). The endpoint also returns
+      // foreign routes (e.g. "MIA / GRU" when loading GRU) which must be dropped.
       if (raw.airportOneId !== payload.hubAirportId) continue;
       if (lines.has(raw.id)) continue;
       const weeklyDemand: Record<CabinClass, number> = {
@@ -117,7 +117,7 @@ export function buildModel(payloads: PlanningPayload[]): {
   return { lines, aircraft };
 }
 
-/** Indexa las lineas por hub (para que cada avion solo evalue las de su hub). */
+/** Index lines by hub (so each aircraft only evaluates its own hub's lines). */
 export function linesByHub(lines: Map<number, Line>): Map<number, Line[]> {
   const idx = new Map<number, Line[]>();
   for (const line of lines.values()) {
@@ -127,7 +127,7 @@ export function linesByHub(lines: Map<number, Line>): Map<number, Line[]> {
   return idx;
 }
 
-/** Reinicia el estado mutable del modelo (demanda y tiempo) para re-optimizar. */
+/** Reset the model's mutable state (demand and time) to re-optimize. */
 export function resetModel(lines: Map<number, Line>, aircraft: Aircraft[]): void {
   for (const line of lines.values()) {
     line.remaining = { ...line.weeklyDemand };

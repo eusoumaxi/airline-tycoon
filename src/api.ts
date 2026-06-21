@@ -1,7 +1,7 @@
 import { BASE_URL, COOKIE, USER_AGENT } from "./config.ts";
 import type { AircraftPlan, Hub, PlanningPayload } from "./types.ts";
 
-/** Headers para pedir una pagina HTML (como navegacion del navegador). */
+/** Headers for an HTML page request (like a normal browser navigation). */
 function pageHeaders(): Record<string, string> {
   return {
     accept:
@@ -20,31 +20,7 @@ function pageHeaders(): Record<string, string> {
   };
 }
 
-/**
- * Descubre todos los hubs del jugador leyendo la pagina /network/planning.
- * Cada hub aparece como `data-hubId="<loadId>"` junto a su codigo y airportId,
- * p.ej. `... BOG / 156`. Devuelve [{loadId, code, airportId}].
- */
-export async function discoverHubs(): Promise<Hub[]> {
-  const url = `${BASE_URL}/network/planning`;
-  const res = await fetch(url, { headers: pageHeaders() });
-  if (!res.ok) throw new Error(`GET ${url} -> ${res.status} (¿cookie caducada?)`);
-  const html = await res.text();
-
-  const hubs: Hub[] = [];
-  const seen = new Set<number>();
-  // <span ... data-airportid="156" data-hubId="9572489"> BOG / <img...>
-  const re = /data-airportid="(\d+)"\s+data-hubId="(\d+)">\s*([A-Z]{3})/g;
-  for (let m = re.exec(html); m; m = re.exec(html)) {
-    const loadId = Number(m[2]);
-    if (seen.has(loadId)) continue;
-    seen.add(loadId);
-    hubs.push({ loadId, code: m[3], airportId: Number(m[1]) });
-  }
-  return hubs;
-}
-
-/** Headers que replican EXACTAMENTE el curl del list (incluye el User-Agent tal cual). */
+/** Headers that EXACTLY replicate the `list` curl (incl. the User-Agent as-is). */
 function listHeaders(): Record<string, string> {
   return {
     accept: "application/json, text/javascript, */*; q=0.01",
@@ -63,7 +39,30 @@ function listHeaders(): Record<string, string> {
   };
 }
 
-/** Descarga el planning de un hub (endpoint `list` del curl). */
+/**
+ * Discover all the player's hubs by reading /network/planning. Each hub appears
+ * as `data-airportid="156" data-hubId="9572489"> BOG / <img...>`.
+ * Returns [{loadId, code, airportId}].
+ */
+export async function discoverHubs(): Promise<Hub[]> {
+  const url = `${BASE_URL}/network/planning`;
+  const res = await fetch(url, { headers: pageHeaders() });
+  if (!res.ok) throw new Error(`GET ${url} -> ${res.status} (cookie expired?)`);
+  const html = await res.text();
+
+  const hubs: Hub[] = [];
+  const seen = new Set<number>();
+  const re = /data-airportid="(\d+)"\s+data-hubId="(\d+)">\s*([A-Z]{3})/g;
+  for (let m = re.exec(html); m; m = re.exec(html)) {
+    const loadId = Number(m[2]);
+    if (seen.has(loadId)) continue;
+    seen.add(loadId);
+    hubs.push({ loadId, code: m[3], airportId: Number(m[1]) });
+  }
+  return hubs;
+}
+
+/** Download one hub's planning (the `list` endpoint from the curl). */
 export async function fetchPlanning(planningId: number): Promise<PlanningPayload> {
   const url = `${BASE_URL}/network/planning/load/${planningId}`;
   const res = await fetch(url, { headers: listHeaders() });
@@ -71,24 +70,24 @@ export async function fetchPlanning(planningId: number): Promise<PlanningPayload
     const body = await res.text().catch(() => "");
     throw new Error(
       `GET ${url} -> ${res.status} ${res.statusText}. ` +
-        `Probablemente la cookie caduco; actualiza COOKIE en src/config.ts.\n${body.slice(0, 300)}`,
+        `The cookie probably expired; update COOKIE in src/config.ts.\n${body.slice(0, 300)}`,
     );
   }
   const data = (await res.json()) as PlanningPayload;
   if (!data?.aircraftDataArray || !data?.lineDataArray) {
-    throw new Error(`Respuesta inesperada de ${url}: faltan aircraftDataArray/lineDataArray`);
+    throw new Error(`Unexpected response from ${url}: missing aircraftDataArray/lineDataArray`);
   }
   return data;
 }
 
-/** Descarga y fusiona varios hubs en un unico payload. */
+/** Download and return several hubs' planning. */
 export async function fetchAllPlannings(planningIds: number[]): Promise<PlanningPayload[]> {
   return Promise.all(planningIds.map(fetchPlanning));
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// UPDATE — implementado pero NO se llama (el usuario pidio solo el algoritmo).
-// Cuando quieras aplicar el plan, llama a esta funcion. Necesita la cookie viva.
+// UPDATE — pushes one aircraft's weekly planning to the game. Used by apply.ts.
+// One POST per aircraft, body = planningData={"aircraftId":X,"added":[...]}.
 // ───────────────────────────────────────────────────────────────────────────
 export async function updatePlanning(plan: AircraftPlan): Promise<unknown> {
   const url = `${BASE_URL}/network/planning/0/ajax`;

@@ -3,12 +3,12 @@ import { capacityOf, roundTripDuration } from "./model.ts";
 import type { Aircraft, CabinClass, Line, ProposedFlight } from "./types.ts";
 
 const CLASSES: CabinClass[] = ["eco", "bus", "first", "cargo"];
-const DAYS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
+const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
-const fmt = (n: number) => Math.round(n).toLocaleString("es-ES");
+const fmt = (n: number) => Math.round(n).toLocaleString("en-US");
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
 
-/** Convierte segundos de la semana en "Lun 14:30". */
+/** Convert week-seconds into "Mon 14:30". */
 function dayTime(t: number): string {
   const d = Math.floor(t / 86400) % 7;
   const h = Math.floor((t % 86400) / 3600);
@@ -21,9 +21,9 @@ function utilOf(durations: number[]): number {
 }
 
 /**
- * Genera un HTML autocontenido para UN hub mostrando como quedaria el planning
- * con el reajuste: resumen, linea de tiempo semanal por avion (bloques de color
- * = rutas) y tabla de rutas (demanda vs oferta).
+ * Build a self-contained HTML for ONE hub showing how the planning would look
+ * after the readjustment: summary, a collapsible game-style weekly grid per
+ * aircraft (Current vs Proposed) and a routes table (offer vs demand).
  */
 export function buildHubHtml(
   hubCode: string,
@@ -33,7 +33,7 @@ export function buildHubHtml(
 ): string {
   const hubLines = [...lines.values()].filter((l) => hubAircraft[0] && l.hubId === hubAircraft[0].hubId);
 
-  // ── Oferta por ruta (del plan propuesto) ────────────────────────────────────
+  // ── Offer per route (from the proposed plan) ─────────────────────────────────
   const offered = new Map<number, Record<CabinClass, number>>();
   const flightsPerLine = new Map<number, number>();
   for (const a of hubAircraft) {
@@ -47,7 +47,7 @@ export function buildHubHtml(
     }
   }
 
-  // ── Utilizacion antes/despues ───────────────────────────────────────────────
+  // ── Utilization before/after ─────────────────────────────────────────────────
   let beforeSum = 0,
     afterSum = 0,
     flying = 0;
@@ -67,56 +67,76 @@ export function buildHubHtml(
   const after = hubAircraft.length ? afterSum / hubAircraft.length : 0;
   const idleRows = rows.filter((r) => r.plan.length === 0);
 
-  // ── Leyenda de rutas (color del juego) ──────────────────────────────────────
+  // ── Route legend (game color) ────────────────────────────────────────────────
   const lineColor = new Map<number, string>();
   for (const l of hubLines) lineColor.set(l.id, l.color || "#999");
 
-  // ── HTML ────────────────────────────────────────────────────────────────────
-  // Cabecera de horas y lineas de hora (cada 3h) para la rejilla tipo el juego.
+  // ── Grid header (hour ticks every 3h + hour gridlines) ───────────────────────
   const hourTicks = Array.from({ length: 9 }, (_, i) => i * 3)
     .map((h) => `<span class="hr" style="left:${(h / 24) * 100}%">${h}</span>`)
     .join("");
   const hourLines = Array.from({ length: 24 }, (_, h) => `<i style="left:${(h / 24) * 100}%"></i>`).join("");
 
-  /** Rejilla semanal 7 dias x 24h de un avion (vuelos = bloques de color). */
-  const weekGrid = (a: Aircraft, plan: ProposedFlight[]): string => {
+  /**
+   * Weekly 7-day x 24h grid for an aircraft (flights = colored game blocks).
+   * Reusable for the CURRENT or the PROPOSED plan. Flights that cross the week
+   * boundary are split (the tail continues on Monday).
+   */
+  const weekGrid = (a: Aircraft, flights: { takeOffTime: number; lineId: number }[], label: string): string => {
+    type Iv = { s: number; e: number; col: string; name: string; title: string; head: boolean };
+    const ivs: Iv[] = [];
+    for (const f of flights) {
+      const line = lines.get(f.lineId);
+      if (!line) continue;
+      const dur = roundTripDuration(a, line);
+      const s = f.takeOffTime;
+      const e = s + dur;
+      const col = lineColor.get(f.lineId) ?? "#999";
+      const title = `${esc(line.name)} · dep ${dayTime(s)} → arr ${dayTime((s + dur) % WEEK_SECONDS)} · ${(dur / 3600).toFixed(1)}h`;
+      if (e <= WEEK_SECONDS) {
+        ivs.push({ s, e, col, name: esc(line.name), title, head: true });
+      } else {
+        ivs.push({ s, e: WEEK_SECONDS, col, name: esc(line.name), title, head: true });
+        ivs.push({ s: 0, e: e - WEEK_SECONDS, col, name: "", title, head: false }); // tail at week start
+      }
+    }
     const dayRows = DAYS.map((dname, d) => {
       const dStart = d * 86400;
       const dEnd = dStart + 86400;
-      const segs = plan
-        .map((f) => {
-          const line = lines.get(f.lineId);
-          if (!line) return "";
-          const dur = roundTripDuration(a, line);
-          const s = f.takeOffTime;
-          const e = s + dur;
-          const os = Math.max(s, dStart);
-          const oe = Math.min(e, dEnd);
+      const segs = ivs
+        .map((iv) => {
+          const os = Math.max(iv.s, dStart);
+          const oe = Math.min(iv.e, dEnd);
           if (os >= oe) return "";
           const left = ((os - dStart) / 86400) * 100;
           const w = ((oe - os) / 86400) * 100;
-          const label = s >= dStart && s < dEnd ? esc(line.name) : ""; // etiqueta solo el dia de salida
-          return `<div class="seg" style="left:${left}%;width:${w}%;background:${lineColor.get(f.lineId) ?? "#999"}" title="${esc(line.name)} · ${dayTime(s)} → ${dayTime(e)} · ${(dur / 3600).toFixed(1)}h"><span>${label}</span></div>`;
+          const lbl = iv.head && iv.s >= dStart && iv.s < dEnd ? iv.name : ""; // label on the departure day
+          return `<div class="seg" style="left:${left}%;width:${w}%;background:${iv.col}" title="${iv.title}"><span>${lbl}</span></div>`;
         })
         .join("");
       return `<div class="drow"><span class="dl">${dname}</span><div class="dtrack">${hourLines}${segs}</div></div>`;
     }).join("");
-    return `<div class="grid"><div class="ghead"><span class="dl"></span><div class="hticks">${hourTicks}</div></div>${dayRows}</div>`;
+    return `<div class="gwrap"><div class="glabel">${label}</div><div class="grid"><div class="ghead"><span class="dl"></span><div class="hticks">${hourTicks}</div></div>${dayRows}</div></div>`;
   };
 
   const timeline = rows
-    .map(({ a, after, plan }) => {
+    .map(({ a, before, after, plan }) => {
       const routes = [...new Set(plan.map((f) => f.lineId))]
         .map((id) => `${esc(lines.get(id)?.name ?? String(id))}×${plan.filter((f) => f.lineId === id).length}`)
         .join(", ");
       const cls = after >= 0.99 ? "hi" : after >= 0.9 ? "mid" : "lo";
+      const cur = a.planningList.map((p) => ({ takeOffTime: p.takeOffTime, lineId: p.lineId }));
       return `<details class="acd">
         <summary>
           <span class="nm"><b>${esc(a.name)}</b> <i>${esc(a.aircraftListName)}</i></span>
           <span class="su ${cls}">${plan.length ? pct(after) : "—"}</span>
-          <span class="rs">${esc(routes) || "sin usar"}</span>
+          <span class="bef">was ${pct(before)}</span>
+          <span class="rs">${esc(routes) || "unused"}</span>
         </summary>
-        ${weekGrid(a, plan)}
+        <div class="grids">
+          ${weekGrid(a, cur, "● Current")}
+          ${weekGrid(a, plan, "● Proposed")}
+        </div>
       </details>`;
     })
     .join("");
@@ -141,9 +161,9 @@ export function buildHubHtml(
 
   const flights = [...flightsPerLine.values()].reduce((s, n) => s + n, 0);
 
-  return `<!doctype html><html lang="es"><head><meta charset="utf-8">
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Planning ${esc(hubCode)} — reajuste</title>
+<title>Planning ${esc(hubCode)} — readjustment</title>
 <style>
   :root{--bg:#0f1420;--card:#1a2030;--ln:#2a3550;--tx:#e6ebf5;--mut:#8e9bb5;--hi:#37d67a;--mid:#f5a623;--lo:#ec5b5b}
   *{box-sizing:border-box}
@@ -162,7 +182,7 @@ export function buildHubHtml(
   th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--ln);font-size:13px;vertical-align:middle}
   th{color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;position:sticky;top:0;background:var(--bg)}
   td.n{text-align:right;font-variant-numeric:tabular-nums}
-  /* lista colapsable de aviones con rejilla semanal */
+  /* collapsible aircraft list with weekly grid */
   .acd{background:var(--card);border:1px solid var(--ln);border-radius:9px;margin-bottom:6px;overflow:hidden}
   .acd summary{display:flex;align-items:center;gap:14px;padding:8px 14px;cursor:pointer;list-style:none}
   .acd summary::-webkit-details-marker{display:none}
@@ -173,8 +193,13 @@ export function buildHubHtml(
   .nm{min-width:175px;flex:none}.nm b{font-size:14px}.nm i{color:var(--mut);font-style:normal;font-size:11px;margin-left:5px}
   summary .su{font-weight:700;font-variant-numeric:tabular-nums;min-width:52px;flex:none}
   summary .su.hi{color:var(--hi)}summary .su.mid{color:var(--mid)}summary .su.lo{color:var(--lo)}
+  summary .bef{color:var(--mut);font-size:11px;flex:none}
   .rs{color:var(--mut);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .grid{padding:9px 14px 12px;border-top:1px solid var(--ln);background:#11182680}
+  .grids{display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid var(--ln)}
+  @media(max-width:900px){.grids{grid-template-columns:1fr}}
+  .gwrap{padding:8px 12px 12px}
+  .gwrap+.gwrap{border-left:1px solid var(--ln)}
+  .glabel{font-size:11px;color:var(--mut);font-weight:600;margin-bottom:6px}
   .ghead,.drow{display:flex;align-items:center;gap:8px;height:21px}
   .dl{width:30px;color:var(--mut);font-size:11px;flex:none;text-align:right}
   .hticks{position:relative;flex:1;height:13px}
@@ -192,20 +217,20 @@ export function buildHubHtml(
   .ctrls button:hover{background:#212a3e;border-color:#37507e}
   .ctrls #flt{flex:1;min-width:180px;background:#0a0e17;color:var(--tx);border:1px solid var(--ln);border-radius:7px;padding:7px 12px;font-size:12px}
 </style></head><body><div class="wrap">
-  <h1>Planning ${esc(hubCode)} — cómo quedaría con el reajuste</h1>
-  <div class="sub">${hubAircraft.length} aviones · ${hubLines.length} rutas · ${fmt(flights)} vuelos/semana · NO se ha enviado ningún cambio al juego</div>
+  <h1>Planning ${esc(hubCode)} — how it would look after the readjustment</h1>
+  <div class="sub">${hubAircraft.length} aircraft · ${hubLines.length} routes · ${fmt(flights)} flights/week · NO change has been sent to the game</div>
 
   <div class="cards">
-    <div class="c"><div class="k">Utilización media</div><div class="v">${pct(after)} <small>antes ${pct(before)}</small></div></div>
-    <div class="c"><div class="k">Aviones volando</div><div class="v">${flying}<small> / ${hubAircraft.length}</small></div></div>
-    <div class="c"><div class="k">Aviones sin usar</div><div class="v ${idleRows.length ? "warn" : ""}">${idleRows.length}</div></div>
-    <div class="c"><div class="k">Vuelos / semana</div><div class="v">${fmt(flights)}</div></div>
+    <div class="c"><div class="k">Average utilization</div><div class="v">${pct(after)} <small>was ${pct(before)}</small></div></div>
+    <div class="c"><div class="k">Flying aircraft</div><div class="v">${flying}<small> / ${hubAircraft.length}</small></div></div>
+    <div class="c"><div class="k">Unused aircraft</div><div class="v ${idleRows.length ? "warn" : ""}">${idleRows.length}</div></div>
+    <div class="c"><div class="k">Flights / week</div><div class="v">${fmt(flights)}</div></div>
   </div>
 
   ${
     idleRows.length
-      ? `<h2>Aviones sin usar (${idleRows.length}) — sin vuelo rentable disponible (deja el slot libre)</h2>
-  <table><thead><tr><th>Avión</th><th>Modelo</th><th class="n">Alcance km</th><th class="n">Eco/Bus/Fst</th><th class="n">Carga t</th></tr></thead><tbody>
+      ? `<h2>Unused aircraft (${idleRows.length}) — no profitable flight available (slot left free)</h2>
+  <table><thead><tr><th>Aircraft</th><th>Model</th><th class="n">Range km</th><th class="n">Eco/Bus/Fst</th><th class="n">Cargo t</th></tr></thead><tbody>
   ${idleRows
     .map(
       ({ a }) =>
@@ -216,20 +241,20 @@ export function buildHubHtml(
       : ""
   }
 
-  <h2>Planning semanal por avión — clic para desplegar la rejilla (Lun→Dom × 0-23h)</h2>
-  <div class="note" style="margin-bottom:10px">Cada fila es un avión (colapsada). Al desplegar ves su semana día por día; cada bloque de color es un vuelo (color = ruta del juego), posicionado por su hora de salida y duración.</div>
+  <h2>Weekly planning per aircraft — click to expand the grid (Mon→Sun × 0-23h)</h2>
+  <div class="note" style="margin-bottom:10px">Each row is an aircraft (collapsed). Expand it to see its week day by day, Current vs Proposed side by side; each colored block is a flight (color = game route), placed by departure time and duration.</div>
   <div class="ctrls">
-    <button onclick="document.querySelectorAll('.acd').forEach(d=>d.open=true)">▾ Desplegar todos</button>
-    <button onclick="document.querySelectorAll('.acd').forEach(d=>d.open=false)">▸ Colapsar todos</button>
-    <input id="flt" placeholder="filtrar por avión o ruta…" oninput="var q=this.value.toLowerCase();document.querySelectorAll('.acd').forEach(d=>d.style.display=d.textContent.toLowerCase().includes(q)?'':'none')">
+    <button onclick="document.querySelectorAll('.acd').forEach(d=>d.open=true)">▾ Expand all</button>
+    <button onclick="document.querySelectorAll('.acd').forEach(d=>d.open=false)">▸ Collapse all</button>
+    <input id="flt" placeholder="filter by aircraft or route…" oninput="var q=this.value.toLowerCase();document.querySelectorAll('.acd').forEach(d=>d.style.display=d.textContent.toLowerCase().includes(q)?'':'none')">
   </div>
   <div class="aclist">${timeline}</div>
 
-  <h2>Rutas — oferta / demanda semanal (verde = bajo demanda, rojo = sobreoferta)</h2>
+  <h2>Routes — weekly offer / demand (gray = below demand, red = oversupply)</h2>
   <table>
-    <thead><tr><th>Ruta</th><th class="n">km</th><th class="n">vuelos</th><th>Eco</th><th>Business</th><th>First</th><th>Carga (t)</th></tr></thead>
+    <thead><tr><th>Route</th><th class="n">km</th><th class="n">flights</th><th>Eco</th><th>Business</th><th>First</th><th>Cargo (t)</th></tr></thead>
     <tbody>${routeRows}</tbody>
   </table>
-  <div class="note">Cada celda: <b>ofertado</b> / demanda semanal, y la diferencia (+ = sobreoferta).</div>
+  <div class="note">Each cell: <b>offered</b> / weekly demand, and the difference (+ = oversupply).</div>
 </div></body></html>`;
 }

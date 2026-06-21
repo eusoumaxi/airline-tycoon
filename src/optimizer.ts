@@ -11,14 +11,14 @@ import type { Aircraft, AircraftPlan, AssignedTrip, CabinClass, Line } from "./t
 
 const CLASSES: CabinClass[] = ["eco", "bus", "first", "cargo"];
 
-/** Entrada del heap: clave (densidad), id de avion y epoca (para invalidar). */
+/** Heap entry: key (profit density), aircraft id and epoch (for invalidation). */
 interface HeapEntry {
   key: number;
   id: number;
   epoch: number;
 }
 
-/** Max-heap binario simple por `key`. */
+/** Simple binary max-heap by `key`. */
 class MaxHeap {
   private h: HeapEntry[] = [];
   get size(): number {
@@ -59,14 +59,13 @@ class MaxHeap {
 }
 
 /**
- * BENEFICIO de UN vuelo ida+vuelta de `a` en `line`, dado el estado de la
- * demanda: ingresos de la DEMANDA REAL que llenaria menos el coste del vuelo.
- *   value = Σ_clase  min(asientos, demanda_restante) · precio        (ingresos)
- *         − COST_PER_KM · distancia · 2                              (coste)
- * Los asientos que sobran (sobreoferta) valen 0 (vuelan vacios, no ingresan).
- * Si value <= 0 el vuelo NO se programa (pierde plata) -> el slot queda libre.
- * Asi la sobreoferta se acota sola: al agotarse la demanda, los vuelos extra
- * dejan de ser rentables y no se vuelan.
+ * PROFIT of ONE round trip of `a` on `line`, given the current demand state:
+ * revenue from the REAL demand it would fill minus the flight cost.
+ *   value = Σ_class min(seats, remaining)·price        (revenue)
+ *         − COST_PER_KM · distance · 2                 (cost)
+ * Seats above demand fly empty and earn 0. If value <= 0 the flight is NOT
+ * scheduled (it loses money) -> the slot stays free. This caps oversupply on its
+ * own: once demand runs out, extra flights stop being profitable and aren't flown.
  */
 function roundTripValue(a: Aircraft, line: Line): {
   value: number;
@@ -82,16 +81,16 @@ function roundTripValue(a: Aircraft, line: Line): {
   for (const c of CLASSES) {
     const seats = cap[c];
     if (seats <= 0) continue;
-    const within = Math.max(0, Math.min(seats, line.remaining[c])); // demanda real que llena
+    const within = Math.max(0, Math.min(seats, line.remaining[c])); // real demand it fills
     fillWithin[c] = within;
-    fillOver[c] = seats - within; // asientos vacios (sobreoferta), no ingresan
+    fillOver[c] = seats - within; // empty seats (oversupply), earn nothing
     revenue += within * line.price[c];
     if (c !== "cargo") {
       paxSeats += seats;
       paxFilled += within;
     }
   }
-  // Salvaguarda opcional: exigir un minimo de ocupacion pax para volar.
+  // Optional safeguard: require a minimum pax load factor to fly.
   if (MIN_FILL > 0 && paxSeats > 0 && paxFilled < MIN_FILL * paxSeats) {
     return { value: 0, fillWithin, fillOver };
   }
@@ -103,12 +102,12 @@ interface Candidate {
   line: Line;
   duration: number;
   value: number;
-  density: number; // valor por segundo de avion
+  density: number; // profit per second of aircraft time
   fillWithin: Record<CabinClass, number>;
   fillOver: Record<CabinClass, number>;
 }
 
-/** Mejor linea (mayor beneficio por segundo) para un avion en el estado actual. */
+/** Best line (highest profit per second) for an aircraft in the current state. */
 function bestLineFor(a: Aircraft, lines: Line[]): Candidate | null {
   let best: Candidate | null = null;
   for (const line of lines) {
@@ -116,14 +115,14 @@ function bestLineFor(a: Aircraft, lines: Line[]): Candidate | null {
     const duration = roundTripDuration(a, line);
     if (duration > a.freeTime) continue;
     const { value, fillWithin, fillOver } = roundTripValue(a, line);
-    if (value <= 0) continue; // no rentable -> no se vuela (slot libre)
+    if (value <= 0) continue; // not profitable -> not flown (slot stays free)
     const density = value / duration;
     if (!best || density > best.density) best = { line, duration, value, density, fillWithin, fillOver };
   }
   return best;
 }
 
-/** Aplica un vuelo: descuenta demanda/margen y tiempo, registra la asignacion. */
+/** Apply a flight: subtract demand/time, record the assignment. */
 function commitTrip(a: Aircraft, cand: Candidate): void {
   for (const c of CLASSES) {
     cand.line.remaining[c] = Math.max(0, cand.line.remaining[c] - cand.fillWithin[c]);
@@ -139,7 +138,7 @@ function commitTrip(a: Aircraft, cand: Candidate): void {
   });
 }
 
-/** Deshace un vuelo: devuelve demanda/margen y tiempo (para el grow-swap). */
+/** Undo a flight: give back demand/time (for the grow-swap). */
 function uncommitTrip(a: Aircraft, line: Line, trip: AssignedTrip): void {
   for (const c of CLASSES) {
     line.remaining[c] += trip.within[c];
@@ -149,26 +148,17 @@ function uncommitTrip(a: Aircraft, line: Line, trip: AssignedTrip): void {
 }
 
 /**
- * Asignacion greedy global por densidad de valor.
+ * Greedy allocation by profit density (lazy heap).
  *
- * Mientras exista algun vuelo con valor positivo que quepa, se elige el de mayor
- * valor-por-segundo en toda la flota y se programa UN vuelo. Por el modelo de 3
- * niveles esto:
- *  - sirve primero la demanda mas rentable con los aviones mas eficientes,
- *  - reparte cada avion entre varias lineas si conviene,
- *  - prefiere rellenar demanda que quede (p.ej. 400 eco) antes que sobre-ofertar,
- *  - solo sobre-oferta de mas para llenar el avion al maximo (MAX_OCCUPANCY),
- *  - respeta alcance y tiempo semanal.
+ * An aircraft's density can only DROP when another aircraft consumes demand from
+ * its best line. So a heap entry is an upper bound: when popped, recompute it; if
+ * unchanged it is the true max and is committed; if it dropped, re-insert with the
+ * new density. The epoch discards stale entries of an aircraft that already moved on.
  */
 function greedyAllocate(aircraft: Aircraft[], hubLines: Line[]): void {
   const fleet = aircraft.filter((a) => !(SKIP_RENTALS && a.isRental));
   const byId = new Map(fleet.map((a) => [a.id, a]));
 
-  // Heap lazy: la densidad de un avion solo puede BAJAR cuando otro avion
-  // consume demanda de su mejor linea. Por eso una entrada del heap es una cota
-  // superior: al sacarla, recalculamos; si sigue igual es el maximo real y se
-  // confirma; si bajo, se reinserta con la nueva densidad. La epoca descarta
-  // entradas viejas de un avion que ya avanzo.
   const heap = new MaxHeap();
   const epoch = new Map<number, number>();
   const bump = (id: number) => {
@@ -183,29 +173,28 @@ function greedyAllocate(aircraft: Aircraft[], hubLines: Line[]): void {
   }
 
   for (let top = heap.pop(); top; top = heap.pop()) {
-    if (top.epoch !== epoch.get(top.id)) continue; // entrada superada
+    if (top.epoch !== epoch.get(top.id)) continue; // superseded entry
     const a = byId.get(top.id)!;
     const fresh = bestLineFor(a, hubLines);
-    if (!fresh) continue; // ya no cabe nada para este avion
+    if (!fresh) continue; // nothing fits for this aircraft anymore
     if (fresh.density < top.key - 1e-6) {
-      heap.push({ key: fresh.density, id: a.id, epoch: bump(a.id) }); // bajo: reinsertar
+      heap.push({ key: fresh.density, id: a.id, epoch: bump(a.id) }); // dropped: re-insert
       continue;
     }
-    commitTrip(a, fresh); // es el maximo real -> programar el vuelo
+    commitTrip(a, fresh); // it is the true max -> schedule the flight
     const next = bestLineFor(a, hubLines);
     if (next) heap.push({ key: next.density, id: a.id, epoch: bump(a.id) });
   }
 }
 
 /**
- * RE-TESELADO (grow-swap + gap-fill) para acercar la utilizacion a ~100%.
+ * TIGHTEN (grow-swap + gap-fill) to push toward more profit / less idle time.
  *
- * El greedy ya empaqueta hasta que no cabe ningun vuelo mas, pero deja huecos
- * mas cortos que cualquier ruta. Aqui, por cada avion:
- *   - GROW-SWAP: cambia un vuelo por otro MAS LARGO que quepa en el hueco (suele
- *     pagar mas: ruta mas larga = mas ingresos), reduciendo el espacio vacio.
- *   - GAP-FILL: si aun cabe algun vuelo en el hueco, lo añade.
- * Es consciente de la demanda (des-asigna y re-evalua), asi no rompe el reparto.
+ * Per aircraft:
+ *   - GROW-SWAP: replace a flight with a LONGER/more profitable one that fits the
+ *     gap, without losing value.
+ *   - GAP-FILL: add any profitable flight that still fits the gap.
+ * It is demand-aware (un-assigns and re-evaluates) so it doesn't break the split.
  */
 function tightenPacking(aircraft: Aircraft[], lines: Map<number, Line>, candLines: Line[]): void {
   const fleet = aircraft.filter((a) => !(SKIP_RENTALS && a.isRental));
@@ -214,31 +203,31 @@ function tightenPacking(aircraft: Aircraft[], lines: Map<number, Line>, candLine
     for (let round = 0; round < TIGHTEN_ROUNDS; round++) {
       let improved = false;
 
-      // GROW-SWAP: por cada vuelo, intentar cambiarlo por uno mas largo que llene mas.
+      // GROW-SWAP: for each flight, try a longer one that fills more.
       for (let i = 0; i < a.assigned.length; i++) {
         const trip = a.assigned[i];
         const oldLine = lines.get(trip.lineId)!;
-        uncommitTrip(a, oldLine, trip); // libera tiempo y demanda
+        uncommitTrip(a, oldLine, trip); // free time and demand
 
-        // Buscar la mejor ruta mas larga que el vuelo actual y que quepa.
+        // Best route longer than the current flight that fits.
         let best: Candidate | null = null;
         for (const line of candLines) {
           if (!canFly(a, line)) continue;
           const duration = roundTripDuration(a, line);
-          if (duration <= trip.duration || duration > a.freeTime) continue; // debe ser MAS larga y caber
+          if (duration <= trip.duration || duration > a.freeTime) continue; // must be LONGER and fit
           const { value, fillWithin, fillOver } = roundTripValue(a, line);
           const density = value / duration;
           if (!best || density > best.density) best = { line, duration, value, density, fillWithin, fillOver };
         }
 
-        // Aceptar solo si no perdemos valor (ruta mas larga suele pagar mas).
+        // Accept only if we don't lose value (a longer route usually pays more).
         if (best && best.value >= trip.value) {
           commitTrip(a, best);
           a.assigned[i] = a.assigned[a.assigned.length - 1];
-          a.assigned.pop(); // el nuevo vuelo quedo al final; quitamos el hueco del indice i
+          a.assigned.pop(); // the new flight went to the end; drop the slot at i
           improved = true;
         } else {
-          // Restaurar el vuelo original tal cual.
+          // Restore the original flight as-is.
           for (const c of CLASSES) {
             oldLine.remaining[c] = Math.max(0, oldLine.remaining[c] - trip.within[c]);
             oldLine.over[c] += trip.over[c];
@@ -247,7 +236,7 @@ function tightenPacking(aircraft: Aircraft[], lines: Map<number, Line>, candLine
         }
       }
 
-      // GAP-FILL: añadir cualquier vuelo que aun quepa en el hueco.
+      // GAP-FILL: add any flight that still fits the gap.
       let fill = bestLineFor(a, candLines);
       while (fill) {
         commitTrip(a, fill);
@@ -260,10 +249,22 @@ function tightenPacking(aircraft: Aircraft[], lines: Map<number, Line>, candLine
   }
 }
 
+/** Deterministic hash of an id -> [0, WEEK) to phase each aircraft differently. */
+function phaseOffset(id: number): number {
+  let x = (id ^ 0x9e3779b9) >>> 0;
+  x = Math.imul(x ^ (x >>> 15), 0x85ebca6b);
+  x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35);
+  x = (x ^ (x >>> 16)) >>> 0;
+  return x % WEEK_SECONDS;
+}
+
 /**
- * Genera los takeOffTime de un avion: empaqueta los vuelos secuencialmente
- * desde t=0 y reparte el tiempo sobrante como holgura uniforme entre vuelos
- * (salidas mas regulares). Garantiza que no se solapen.
+ * Generate an aircraft's takeOffTimes. Flights are spread with uniform slack and
+ * given a per-aircraft pseudo-random PHASE offset (cyclic), so they don't all
+ * start Monday 00:00: each aircraft begins at a different point of the week and
+ * aircraft flying the same route end up staggered. Still non-overlapping and
+ * fills the week (rotation preserves the gaps; a flight may cross the week
+ * boundary, which the game accepts).
  */
 function scheduleTimes(a: Aircraft): { takeOffTime: number; lineId: number }[] {
   const n = a.assigned.length;
@@ -271,26 +272,28 @@ function scheduleTimes(a: Aircraft): { takeOffTime: number; lineId: number }[] {
   const used = a.assigned.reduce((s, t) => s + t.duration, 0);
   const slack = Math.max(0, WEEK_SECONDS - used);
   const gap = Math.floor(slack / n);
+  const offset = phaseOffset(a.id);
 
   const out: { takeOffTime: number; lineId: number }[] = [];
   let t = 0;
   for (const trip of a.assigned) {
-    out.push({ takeOffTime: Math.round(t), lineId: trip.lineId });
+    out.push({ takeOffTime: (Math.round(t) + offset) % WEEK_SECONDS, lineId: trip.lineId });
     t += trip.duration + gap;
   }
+  out.sort((x, y) => x.takeOffTime - y.takeOffTime);
   return out;
 }
 
 export interface OptimizationResult {
   plans: AircraftPlan[];
-  /** Vuelos totales programados. */
+  /** Total scheduled flights. */
   totalFlights: number;
 }
 
-/** Ejecuta el algoritmo completo y devuelve el plan por avion (sin enviarlo). */
+/** Run the full algorithm and return the per-aircraft plan (without sending it). */
 export function optimize(aircraft: Aircraft[], lines: Map<number, Line>): OptimizationResult {
-  // Los hubs son independientes (ningun avion vuela rutas de otro hub), asi que
-  // optimizamos cada hub por separado: mismo resultado y mucho mas rapido.
+  // Hubs are independent (no aircraft flies another hub's routes), so optimize
+  // each hub separately: same result, much faster.
   const hubIdx = linesByHub(lines);
   const byHub = new Map<number, Aircraft[]>();
   for (const a of aircraft) {
@@ -299,8 +302,8 @@ export function optimize(aircraft: Aircraft[], lines: Map<number, Line>): Optimi
   }
   for (const [hubId, planes] of byHub) {
     const hubLines = hubIdx.get(hubId) ?? [];
-    greedyAllocate(planes, hubLines); // sirve demanda rentable (slots no rentables quedan libres)
-    tightenPacking(planes, lines, hubLines); // re-tesela hacia vuelos mas rentables
+    greedyAllocate(planes, hubLines); // serve profitable demand (unprofitable slots stay free)
+    tightenPacking(planes, lines, hubLines); // re-tile toward more profitable flights
   }
 
   const plans: AircraftPlan[] = [];
