@@ -120,5 +120,43 @@ export const BREAK_EVEN_LOAD_CARGO = 0.37;
 /** Number of TIGHTEN passes (grow-swap + gap-fill) that push toward more profit. */
 export const TIGHTEN_ROUNDS = 4;
 
+// ───────────────────────────────────────────────────────────────────────────
+// Buy catalog — the MODERN aircraft to recommend buying for underserved routes.
+// The recommender picks a model per route by category fit (a model flies a route
+// only if route.category >= model.cat and model.range >= distance) and sizes a
+// seat config to the route/hub demand mix. Edit this when you want other models.
+//
+// `paxMax` is the all-economy seat headline (the cabin's "equivalent" budget). A
+// business seat costs CABIN_EQUIV.bus economy units and first costs CABIN_EQUIV.first,
+// and each cargo ton costs CABIN_EQUIV.cargoTon — so eco + 2·bus + 3·first + 2·cargoT
+// ≈ paxMax (calibrated from the in-game default configs the player provided).
+// ───────────────────────────────────────────────────────────────────────────
+export interface BuyModel {
+  model: string;
+  cat: number; // aircraft category (flies a route only if route.category >= cat)
+  range: number; // km one-way
+  speed: number; // km/h (for trips-per-week sizing)
+  paxMax: number; // all-economy seat budget (cabin "equivalent" units); 0 for a freighter
+  payloadMax: number; // tons (max cargo)
+  price: number; // $ each
+  cargo?: boolean; // true = dedicated freighter (0 seats, all payload)
+  def: { eco: number; bus: number; first: number; cargo: number }; // game default config
+}
+
+/** Economy-equivalent "space cost" of one seat/ton, calibrated from the defaults. */
+export const CABIN_EQUIV = { eco: 1, bus: 2, first: 3, cargoTon: 2 } as const;
+
+export const BUY_CATALOG: BuyModel[] = [
+  // ── Passenger ───────────────────────────────────────────────────────────────
+  // A350-900ULR — widebody, reaches anything, for the big (cat ≥ 7) routes.
+  { model: "A350-900ULR", cat: 7, range: 18000, speed: 911, paxMax: 440, payloadMax: 44, price: 317_400_000, def: { eco: 151, bus: 81, first: 34, cargo: 13 } },
+  // A321XLR — narrowbody, for the mid (cat 5–6) routes; also cheaper on short cat ≥ 7.
+  { model: "A321XLR", cat: 5, range: 8700, speed: 876, paxMax: 244, payloadMax: 24.4, price: 159_895_000, def: { eco: 83, bus: 45, first: 19, cargo: 7 } },
+  // ── Cargo / freighter (the only freighters you said you can buy) ──────────────
+  // Categories are estimates (the screenshots didn't show them) — adjust if wrong.
+  { model: "A330-300P2F", cat: 7, range: 6850, speed: 871, paxMax: 0, payloadMax: 62, price: 260_330_000, cargo: true, def: { eco: 0, bus: 0, first: 0, cargo: 62 } },
+  { model: "A321P2F", cat: 5, range: 3800, speed: 876, paxMax: 0, payloadMax: 27, price: 91_000_000, cargo: true, def: { eco: 0, bus: 0, first: 0, cargo: 27 } },
+];
+
 /** Do not move rental aircraft (they often have a fixed configuration). */
 export const SKIP_RENTALS = false;

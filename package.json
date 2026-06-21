@@ -9,7 +9,8 @@
     "fetch": "bun run src/index.ts --fetch-only",
     "offline": "bun run src/index.ts --offline",
     "apply": "bun run src/apply.ts",
-    "apply:live": "bun run src/apply.ts --apply"
+    "apply:live": "bun run src/apply.ts --apply",
+    "buyroute": "bun run src/buyroute.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

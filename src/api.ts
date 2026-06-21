@@ -1,4 +1,5 @@
 import { BASE_URL, COOKIE, USER_AGENT } from "./config.ts";
+import type { BuyableRoute } from "./recommend.ts";
 import type { AircraftPlan, Hub, PlanningPayload } from "./types.ts";
 
 /** Headers for an HTML page request (like a normal browser navigation). */
@@ -123,4 +124,76 @@ export async function updatePlanning(plan: AircraftPlan): Promise<unknown> {
   }
   if (!ok) throw new Error(message.slice(0, 220));
   return message;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// BUY ROUTE — read the buyable routes of a hub and (optionally) purchase one.
+//   list    GET  /network/newline/<hubLoadId>/<country>          (HTML)
+//   confirm GET  /network/newlinefinalize/<hubLoadId>/<destCode> (HTML, has token)
+//   buy     POST /network/newlinefinalize/<hubLoadId>/<destCode> (form[_token]=…)
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Parse the buyable-route boxes out of a /network/newline HTML page. */
+export function parseBuyableRoutes(html: string, country: string): BuyableRoute[] {
+  const out: BuyableRoute[] = [];
+  // Each candidate is a <div class="hubListBox" …> block; split on its opening tag.
+  const blocks = html.split(/(?=<div class="hubListBox")/);
+  for (const b of blocks) {
+    if (!b.startsWith('<div class="hubListBox"')) continue;
+    const name = /data-name="([^"]*)"/.exec(b)?.[1] ?? "";
+    const price = Number(/data-price="(\d+)"/.exec(b)?.[1] ?? 0);
+    const dist = Number(/data-distance="(\d+)"/.exec(b)?.[1] ?? 0);
+    const cat = Number(/data-category="(\d+)"/.exec(b)?.[1] ?? 0);
+    const audit = /data-audit="([^"]*)"/.exec(b)?.[1] ?? "0";
+    const auditPrice = Number(/data-auditprice="(\d+)"/.exec(b)?.[1] ?? 0);
+    const code = /newlinefinalize\/\d+\/([a-z0-9]+)"/.exec(b)?.[1];
+    const iata = /\n\s*([A-Z]{3})\s*-\s*\n\s*<i>/.exec(b)?.[1] ?? code?.toUpperCase() ?? "";
+    const demandPct = Number(/barDemandFill"\s+style="width:\s*([\d.]+)%/.exec(b)?.[1] ?? 0);
+    if (!code) continue;
+    out.push({ code, iata, name: name.trim(), country, cat, dist, price, auditPrice, audited: audit !== "0", demandPct });
+  }
+  return out;
+}
+
+/** Download and parse the routes a hub can buy toward a given country (2-letter code). */
+export async function fetchBuyableRoutes(hubLoadId: number, country: string): Promise<BuyableRoute[]> {
+  const url = `${BASE_URL}/network/newline/${hubLoadId}/${country}`;
+  const res = await fetch(url, { headers: pageHeaders() });
+  if (!res.ok) throw new Error(`GET ${url} -> ${res.status} (cookie expired?)`);
+  return parseBuyableRoutes(await res.text(), country);
+}
+
+/** Extract the CSRF token (form[_token]) from the route-finalize confirm page. */
+export async function fetchBuyToken(hubLoadId: number, destCode: string): Promise<string> {
+  const url = `${BASE_URL}/network/newlinefinalize/${hubLoadId}/${destCode}`;
+  const res = await fetch(url, { headers: pageHeaders() });
+  if (!res.ok) throw new Error(`GET ${url} -> ${res.status} (cookie expired?)`);
+  const html = await res.text();
+  const token = /name="form\[_token\]"\s+value="([^"]+)"/.exec(html)?.[1] ?? /form%5B_token%5D=([^"&']+)/.exec(html)?.[1];
+  if (!token) throw new Error(`No form[_token] found on ${url} (route may already be owned, or layout changed)`);
+  return token;
+}
+
+/** Finalize (PURCHASE) a route. Spends in-game money — call only when the user confirms. */
+export async function buyRoute(hubLoadId: number, destCode: string): Promise<string> {
+  const token = await fetchBuyToken(hubLoadId, destCode);
+  const url = `${BASE_URL}/network/newlinefinalize/${hubLoadId}/${destCode}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      ...pageHeaders(),
+      "content-type": "application/x-www-form-urlencoded",
+      origin: BASE_URL,
+      referer: url,
+      "sec-fetch-site": "same-origin",
+    },
+    body: `form%5B_token%5D=${encodeURIComponent(token)}`,
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`POST ${url} -> ${res.status} ${res.statusText}`);
+  // Success usually redirects to the network map; an error keeps the form / shows a message.
+  if (/erreur|error|no se|insufficient|insuffisant|solde/i.test(text.slice(0, 500))) {
+    throw new Error(`Purchase rejected: ${text.replace(/\s+/g, " ").slice(0, 200)}`);
+  }
+  return "ok";
 }

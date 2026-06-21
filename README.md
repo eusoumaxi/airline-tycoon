@@ -26,7 +26,27 @@ bun run apply                       # DRY RUN for the hub(s) in APPLY_HUBS (GRU)
 bun run apply --hub GRU             # DRY RUN for a chosen hub
 bun run apply:live                  # actually SEND the updates (live) for APPLY_HUBS
 bun run src/apply.ts --hub GRU --apply   # send live for a chosen hub
+
+# Buy a NEW route for a hub's surplus (idle) aircraft
+bun run buyroute --hub GRU --country br        # list + rank buyable routes (no spend)
+bun run buyroute --hub GRU --country br,us,gb  # scan several countries
+bun run buyroute --hub GRU --buy ssa           # PURCHASE route GRU→SSA (spends $)
 ```
+
+### The decisions panel (top of every `report_<CODE>.html`)
+Each report now opens with an **actionable plan** built from the optimized result:
+- **🛒 Shopping list** — which modern aircraft to buy (from `BUY_CATALOG` in `config.ts`:
+  A350‑900ULR, A321XLR; freighters A330‑300P2F, A321P2F), **how many**, and a
+  **seat/cargo config computed from that hub's own demand mix** (not a fixed default).
+- **♻️ Surplus aircraft** — for every idle plane: buy a route it can fly (uses the
+  cached `buyable_<CODE>.json` from `buyroute`), reconfigure to cargo, or move hub.
+- **📉 Underserved routes** — least‑covered demand, with what fills each (reuse an
+  idle plane / buy a model / "needs a small aircraft" / "carry cargo in the A350 belly").
+
+> Note: a route's demand is **hidden until you AUDIT it** on the dashboard, so the
+> "buy a route" pick is ranked by airport category + price, not demand. Audit before
+> committing the ~$30M. Aircraft counts are the ceiling to *fully* cover demand —
+> buy incrementally.
 
 Outputs (in `.test/data/`):
 - `load_<id>.json` — raw download per hub.

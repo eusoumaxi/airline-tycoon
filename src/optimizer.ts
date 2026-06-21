@@ -158,7 +158,7 @@ function commitTrip(a: Aircraft, m: Move): void {
  * small aircraft can serve are left for it. Oversupply is fine as long as the seats
  * that DO sell pay for the flight — that is exactly the profit test in roundTripValue.
  */
-function greedyAllocate(aircraft: Aircraft[], hubLines: Line[]): void {
+export function greedyAllocate(aircraft: Aircraft[], hubLines: Line[]): void {
   const fleet = aircraft.filter((a) => !(SKIP_RENTALS && a.isRental));
 
   // Each aircraft gets its own staggered virtual week [phase, phase+WEEK) so the
