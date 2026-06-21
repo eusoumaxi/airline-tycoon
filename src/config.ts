@@ -42,8 +42,8 @@ export const COOKIE =
 export const APPLY_HUBS = ["GRU"];
 
 /** Random delay between each aircraft update (ms). Looks human, avoids rate limits. */
-export const MIN_DELAY_MS = 5_000; // 5 s
-export const MAX_DELAY_MS = 10_000; // 10 s
+export const MIN_DELAY_MS = 3_000; // 3 s
+export const MAX_DELAY_MS = 5_000; // 5 s
 
 // ───────────────────────────────────────────────────────────────────────────
 // Game mechanics (calibrated from the real data)

@@ -62,6 +62,7 @@ interface Move {
   line: Line;
   day: number; // departure day (0..6) whose demand it consumes
   takeOffTime: number; // concrete take-off (s from week start, multiple of granularity)
+  vStart: number; // virtual-clock position of this flight (for advancing the cursor)
   duration: number;
   value: number;
   density: number; // profit per second of aircraft time
@@ -72,40 +73,52 @@ interface Move {
 const ceilTo = (t: number, g: number) => Math.ceil(t / g) * g;
 
 /**
- * Best next flight for an aircraft given its scheduling cursor.
- *
- * Starting at the cursor's day, it looks for the most profitable (per second) route
- * that can DEPART that day and finish within the week. If the current day has no
- * profitable demand left for any reachable route, it advances to the next day's
- * start and tries again (leaving the rest of that day idle — flying more would
- * oversupply it). A flight always departs within its `day`, so the demand it
- * consumes matches what the game meters; long flights (>24 h) simply span into the
- * following days via the cursor, with their demand booked on the departure day.
+ * Deterministic per-aircraft phase in [0, WEEK), on the 900 s grid. Used to STAGGER
+ * the fleet so not every aircraft starts Monday 00:00 (which made the airport "fill
+ * up" at one instant — unrealistic). Pure hash of the id, so it's stable across runs.
  */
-function bestMoveFor(a: Aircraft, lines: Line[]): Move | null {
-  const startDay = Math.floor(a.cursor / DAY_SECONDS);
-  for (let d = startDay; d < DAYS_PER_WEEK; d++) {
-    // Where a flight on day d would take off: the cursor (same day) or the day's
-    // start (after skipping earlier, exhausted days), snapped to the 900 s grid.
-    const base = d === startDay ? a.cursor : d * DAY_SECONDS;
-    const takeOff = ceilTo(base, TIME_GRANULARITY);
-    if (takeOff >= (d + 1) * DAY_SECONDS) continue; // no room left before midnight -> next day
-    if (takeOff >= WEEK_SECONDS) break;
+function phaseOffset(id: number): number {
+  let x = (id ^ 0x9e3779b9) >>> 0;
+  x = Math.imul(x ^ (x >>> 15), 0x85ebca6b);
+  x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35);
+  x = (x ^ (x >>> 16)) >>> 0;
+  const slots = WEEK_SECONDS / TIME_GRANULARITY; // 672 quarter-hour slots in a week
+  return (x % slots) * TIME_GRANULARITY;
+}
+
+/**
+ * Best next flight for an aircraft on its VIRTUAL clock.
+ *
+ * The cursor is a virtual time running over [phase, phase+WEEK); the real take-off is
+ * `cursor mod WEEK`, so every aircraft flies exactly one week but STARTS at its own
+ * phase and wraps around once — departures are staggered across the week instead of
+ * all piling onto Monday 00:00. The demand a flight consumes is keyed off its REAL
+ * departure day (`floor(real/DAY)`), so per-day balancing is unchanged. If the
+ * current day has no profitable route left, it jumps to the next day's start (the
+ * rest of that day stays idle — flying it would only oversupply). `vEnd` =
+ * phase+WEEK bounds the aircraft to a single week.
+ */
+function bestMoveFor(a: Aircraft, lines: Line[], vEnd: number): Move | null {
+  let v = ceilTo(a.cursor, TIME_GRANULARITY); // virtual position, on the 900 s grid
+  while (v < vEnd) {
+    const real = v % WEEK_SECONDS; // concrete take-off time in [0, WEEK)
+    const day = Math.floor(real / DAY_SECONDS);
 
     let best: Move | null = null;
     for (const line of lines) {
       if (!canFly(a, line)) continue;
       const duration = roundTripDuration(a, line);
-      if (takeOff + duration > WEEK_SECONDS) continue; // must finish inside the week
-      const { value, fillWithin, fillOver } = roundTripValue(a, line, d);
-      if (value <= 0) continue; // unprofitable on day d -> skip (caps oversupply)
+      if (v + duration > vEnd) continue; // must finish inside this aircraft's one week
+      const { value, fillWithin, fillOver } = roundTripValue(a, line, day);
+      if (value <= 0) continue; // unprofitable on that day -> skip (caps oversupply)
       const density = value / duration;
       if (!best || density > best.density) {
-        best = { line, day: d, takeOffTime: takeOff, duration, value, density, fillWithin, fillOver };
+        best = { line, day, takeOffTime: real, vStart: v, duration, value, density, fillWithin, fillOver };
       }
     }
     if (best) return best;
-    // day d has no profitable flight for this aircraft -> try the next day
+    // nothing profitable on this real day -> jump to the next day's start (wraps at week end)
+    v += (day + 1) * DAY_SECONDS - real;
   }
   return null;
 }
@@ -118,7 +131,7 @@ function commitTrip(a: Aircraft, m: Move): void {
     rem[c] = Math.max(0, rem[c] - m.fillWithin[c]);
     over[c] += m.fillOver[c];
   }
-  a.cursor = m.takeOffTime + m.duration;
+  a.cursor = m.vStart + m.duration; // advance the VIRTUAL clock (not the wrapped real time)
   a.assigned.push({
     lineId: m.line.id,
     day: m.day,
@@ -148,6 +161,14 @@ function commitTrip(a: Aircraft, m: Move): void {
 function greedyAllocate(aircraft: Aircraft[], hubLines: Line[]): void {
   const fleet = aircraft.filter((a) => !(SKIP_RENTALS && a.isRental));
 
+  // Each aircraft gets its own staggered virtual week [phase, phase+WEEK) so the
+  // fleet doesn't all depart Monday 00:00 (realistic, spread-out take-offs).
+  const vEndOf = new Map<number, number>();
+  for (const a of fleet) {
+    a.cursor = phaseOffset(a.id);
+    vEndOf.set(a.id, a.cursor + WEEK_SECONDS);
+  }
+
   // SCARCITY-AWARE MATCHING + pyramid order. Before an aircraft "burns" a route we
   // must respect that the route may be the ONLY thing another aircraft can fly. So
   // we process the MOST CONSTRAINED aircraft first (fewest flyable routes): it
@@ -159,7 +180,7 @@ function greedyAllocate(aircraft: Aircraft[], hubLines: Line[]): void {
   for (const a of fleet) options.set(a.id, hubLines.reduce((n, l) => n + (canFly(a, l) ? 1 : 0), 0));
 
   const order = fleet
-    .map((a) => ({ a, opt: options.get(a.id)!, density: bestMoveFor(a, hubLines)?.density ?? -Infinity }))
+    .map((a) => ({ a, opt: options.get(a.id)!, density: bestMoveFor(a, hubLines, vEndOf.get(a.id)!)?.density ?? -Infinity }))
     // most-constrained first, then most-efficient; id breaks ties so the SAME
     // aircraft always fills first and the SAME surplus one stays idle (stable wear).
     .sort((x, y) => x.opt - y.opt || y.density - x.density || x.a.id - y.a.id)
@@ -168,7 +189,8 @@ function greedyAllocate(aircraft: Aircraft[], hubLines: Line[]): void {
   // Fill each aircraft to the brim before the next: keep taking its best profitable
   // flight until none is left (demand exhausted for it, or its week is full).
   for (const a of order) {
-    for (let move = bestMoveFor(a, hubLines); move; move = bestMoveFor(a, hubLines)) {
+    const vEnd = vEndOf.get(a.id)!;
+    for (let move = bestMoveFor(a, hubLines, vEnd); move; move = bestMoveFor(a, hubLines, vEnd)) {
       commitTrip(a, move);
     }
   }
