@@ -148,9 +148,11 @@ export const CABIN_EQUIV = { eco: 1, bus: 2, first: 3, cargoTon: 2 } as const;
 
 export const BUY_CATALOG: BuyModel[] = [
   // ── Passenger ───────────────────────────────────────────────────────────────
-  // A350-900ULR — widebody, reaches anything, for the big (cat ≥ 7) routes.
-  { model: "A350-900ULR", cat: 7, range: 18000, speed: 911, paxMax: 440, payloadMax: 44, price: 317_400_000, def: { eco: 151, bus: 81, first: 34, cargo: 13 } },
-  // A321XLR — narrowbody, for the mid (cat 5–6) routes; also cheaper on short cat ≥ 7.
+  // A350-1000 — widebody (cat 8, verified from the owned fleet), 522 seats, for the
+  // BIG routes (cat ≥ 8). Note: being cat 8 it can NOT serve cat-7 routes (those now
+  // fall to the A321XLR, or stay unfilled if too long for it).
+  { model: "A350-1000", cat: 8, range: 14750, speed: 911, paxMax: 522, payloadMax: 56.1, price: 335_000_000, def: { eco: 318, bus: 50, first: 27, cargo: 13 } },
+  // A321XLR — narrowbody, for the mid (cat 5–7) routes; also cheaper on short cat ≥ 8.
   { model: "A321XLR", cat: 5, range: 8700, speed: 876, paxMax: 244, payloadMax: 24.4, price: 159_895_000, def: { eco: 83, bus: 45, first: 19, cargo: 7 } },
   // ── Cargo / freighter (the only freighters you said you can buy) ──────────────
   // Categories are estimates (the screenshots didn't show them) — adjust if wrong.

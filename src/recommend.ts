@@ -201,10 +201,14 @@ export function configFor(m: BuyModel, demand: Record<CabinClass, number>, cargo
   const paxSum = pe + pb + pf || 1;
   const cargo = Math.min(m.payloadMax, Math.max(0, Math.round(cargoTons)));
   const paxEquiv = Math.max(0, m.paxMax - cargo * CABIN_EQUIV.cargoTon);
-  const eco = Math.round((paxEquiv * pe) / paxSum / CABIN_EQUIV.eco);
-  const bus = Math.round((paxEquiv * pb) / paxSum / CABIN_EQUIV.bus);
-  const first = Math.round((paxEquiv * pf) / paxSum / CABIN_EQUIV.first);
-  return { eco: Math.max(0, eco), bus: Math.max(0, bus), first: Math.max(0, first), cargo };
+  const bus = Math.max(0, Math.round((paxEquiv * pb) / paxSum / CABIN_EQUIV.bus));
+  const first = Math.max(0, Math.round((paxEquiv * pf) / paxSum / CABIN_EQUIV.first));
+  let eco = Math.max(0, Math.round((paxEquiv * pe) / paxSum / CABIN_EQUIV.eco));
+  // Rounding can push the total a hair over the cabin budget — trim eco so the config
+  // ALWAYS fits (eco + 2·bus + 3·first + 2·cargo ≤ paxMax), i.e. it's buildable in-game.
+  const over = eco * CABIN_EQUIV.eco + bus * CABIN_EQUIV.bus + first * CABIN_EQUIV.first - paxEquiv;
+  if (over > 0) eco = Math.max(0, eco - Math.ceil(over));
+  return { eco, bus, first, cargo };
 }
 
 const sumClass = (rows: Record<CabinClass, number>[]): Record<CabinClass, number> => {
