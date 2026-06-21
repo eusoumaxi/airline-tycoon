@@ -52,6 +52,13 @@ export const MAX_DELAY_MS = 10_000; // 10 s
 /** Seconds in one planning week. */
 export const WEEK_SECONDS = 604800;
 
+/** Days in a planning week. Demand (`paxAtt*`) is DAILY and regenerates each day. */
+export const DAYS_PER_WEEK = 7;
+
+/** Seconds in one day. The game meters demand PER DAY (Mon..Sun), so the optimizer
+ *  tracks 7 daily demand pools and assigns every flight a departure day. */
+export const DAY_SECONDS = 86400;
+
 /** Default turnaround (s) when it can't be inferred from the aircraft. ~7600 measured. */
 export const DEFAULT_TURNAROUND = 7600;
 
@@ -90,28 +97,25 @@ export const PRICING = {
 /** A round trip is outbound+inbound: both legs earn revenue. */
 export const LEGS_PER_ROUNDTRIP = 2;
 
-// ── Profit model (revenue − cost) ───────────────────────────────────────────
-// Flying empty seats LOSES money (fuel). So a flight's value is its PROFIT:
-// revenue from the REAL demand it fills minus the flight cost. If that is <= 0
-// (a near-empty flight) it is NOT scheduled -> the slot is left free. This caps
-// oversupply on its own (once demand runs out, extra flights stop being
-// profitable) and avoids losing money on routes with no need for it.
+// ── Profit model: real break-even (revenue − cost) ───────────────────────────
+// A flight's cost (fuel + WEAR/maintenance + fees) is almost FIXED — it barely
+// depends on how full the plane is (a 747-8F freighter flying 0 pax still costs
+// money). Verified in the player's own accounting:
+//   · A380  full long-haul: revenue €4.29M, cost €0.66M  -> cost ≈ 15% of revenue
+//   · 747-8F freighter (0 pax): revenue €1.96M, cost €0.73M -> cost ≈ 37%
+// So a flight breaks even at ~that load factor: below it the (fixed) cost eats
+// the revenue and the flight LOSES money. The optimizer therefore flies a round
+// trip only if its REVENUE-WEIGHTED load (across ALL classes — eco that goes
+// half-empty is subsidised by business/first/cargo) clears the break-even; else
+// it leaves the aircraft idle (better idle than a money-losing flight, and less
+// wear). Raise these to fly fewer / fuller flights (protect the fleet); lower to
+// fly more. These are scale-free ratios, so they don't depend on price tuning.
 
-/**
- * Flight cost per km and per leg (fuel+fees), in the same units as PRICING.
- * flight_cost = COST_PER_KM * distance * 2 (round trip). Calibrated so a flight
- * that would only carry belly cargo (empty seats) comes out negative and is NOT
- * flown, while one that serves real demand is. Raise it to demand higher loads
- * (more free slots); lower it to fly more.
- */
-export const COST_PER_KM = 10;
+/** Break-even load (revenue-weighted) for a PASSENGER aircraft. From accounting ≈0.15. */
+export const BREAK_EVEN_LOAD = 0.45;
 
-/**
- * Small safeguard: a flight is only considered if it fills at least this
- * fraction of its pax capacity with real demand (avoids micro-flights serving
- * just a couple of pax). The profit term already does almost all the work.
- */
-export const MIN_FILL = 0;
+/** Break-even load for a CARGO aircraft (freighter) — higher cost share. ≈0.37. */
+export const BREAK_EVEN_LOAD_CARGO = 0.37;
 
 /** Number of TIGHTEN passes (grow-swap + gap-fill) that push toward more profit. */
 export const TIGHTEN_ROUNDS = 4;

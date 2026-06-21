@@ -74,31 +74,46 @@ export interface Line extends RawLine {
    * destination, airportTwoId); those are dropped when building the model.
    */
   hubId: number;
-  /** Weekly remaining demand per class (consumed by the optimizer). */
-  remaining: Record<CabinClass, number>;
-  /** Total weekly demand per class (constant reference). */
+  /**
+   * Remaining demand per class, indexed by DAY (0=Mon .. 6=Sun). The game meters
+   * demand per day, so a flight departing on day `d` only draws from `remaining[d]`.
+   * Each day starts at `dailyDemand` (= `paxAtt*`). This is what stops the optimizer
+   * from oversupplying a single day (the bug that lost money on near-empty flights).
+   */
+  remaining: Record<CabinClass, number>[];
+  /** Demand per class for ONE day (= `paxAtt*`); every day starts here. */
+  dailyDemand: Record<CabinClass, number>;
+  /** Total weekly demand per class (= dailyDemand × 7, constant reference for reports). */
   weeklyDemand: Record<CabinClass, number>;
-  /** Seats already oversupplied per class (above demand). */
-  over: Record<CabinClass, number>;
+  /** Seats oversupplied per class, indexed by DAY (above that day's demand). */
+  over: Record<CabinClass, number>[];
   /** Estimated price per seat/ton (one way) by distance. */
   price: Record<CabinClass, number>;
 }
 
-/** A flight already assigned to an aircraft, with its contribution (to undo it). */
+/** A flight already assigned to an aircraft, with its contribution. */
 export interface AssignedTrip {
   lineId: number;
+  /** Departure day (0=Mon .. 6=Sun) — which daily demand pool it consumes. */
+  day: number;
+  /** Concrete take-off time (s from week start, multiple of TIME_GRANULARITY). */
+  takeOffTime: number;
   duration: number;
-  within: Record<CabinClass, number>; // seats served within demand
-  over: Record<CabinClass, number>; // oversupplied seats
+  within: Record<CabinClass, number>; // seats served within that day's demand
+  over: Record<CabinClass, number>; // oversupplied seats (empty, above demand)
   value: number; // flight value (profit) when assigned
 }
 
 export interface Aircraft extends RawAircraft {
   /** Turnaround inferred for this aircraft (s). */
   turnaround: number;
-  /** Remaining free time in the week (s). */
-  freeTime: number;
-  /** Flights assigned by the optimizer (in order). */
+  /**
+   * Scheduling cursor: the next free second in the week (0..WEEK_SECONDS). Flights
+   * are laid down sequentially from here, so the take-off time — and therefore the
+   * departure DAY — is decided during allocation (no separate, demand-blind pass).
+   */
+  cursor: number;
+  /** Flights assigned by the optimizer (in take-off order). */
   assigned: AssignedTrip[];
 }
 

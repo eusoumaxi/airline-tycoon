@@ -1,14 +1,22 @@
-import { DEMAND_DAYS, LEGS_PER_ROUNDTRIP, WEEK_SECONDS } from "./config.ts";
+import { DAY_SECONDS, DAYS_PER_WEEK, DEMAND_DAYS, LEGS_PER_ROUNDTRIP, WEEK_SECONDS } from "./config.ts";
 import { capacityOf, roundTripDuration } from "./model.ts";
 import type { Aircraft, AircraftPlan, CabinClass, Line } from "./types.ts";
 
 const CLASSES: CabinClass[] = ["eco", "bus", "first", "cargo"];
+const PAX: CabinClass[] = ["eco", "bus", "first"];
 const fmt = (n: number) => n.toLocaleString("en-US", { maximumFractionDigits: 0 });
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
 const money = (n: number) => `€${fmt(n)}`;
+const zero = (): Record<CabinClass, number> => ({ eco: 0, bus: 0, first: 0, cargo: 0 });
 
 /** Fleet indexed by id. */
 export type FleetIndex = Map<number, Aircraft>;
+
+/** A flight with its take-off time, so offer can be bucketed by DEPARTURE DAY. */
+export interface FlightRef {
+  lineId: number;
+  takeOffTime: number;
+}
 
 export interface Metrics {
   /** Average utilization of the flying aircraft. */
@@ -24,45 +32,57 @@ export interface Metrics {
   /** UNUSED aircraft (0 flights). */
   idle: number;
   totalFlights: number;
-  /** Weekly served value (demand-capped) in €. */
+  /** Weekly served value (PER-DAY demand-capped) in €. */
   servedValue: number;
-  /** Demand coverage per class: served / demand. */
+  /** Total per-day pax oversupply (Σ over days & routes of seats above that day's demand). */
+  oversupply: number;
+  /** Demand coverage per class: served / demand (served is per-day capped). */
   coverage: Record<CabinClass, { offered: number; demand: number; served: number }>;
-  /** Offer per line (to measure per-route oversupply). */
-  perLine: Map<number, Record<CabinClass, number>>;
+  /** Per-route weekly offer, per-day served, and per-day oversupply (for the route tables). */
+  perLine: Map<number, { offered: Record<CabinClass, number>; served: Record<CabinClass, number>; over: Record<CabinClass, number> }>;
 }
 
 /**
- * Compute metrics for a set of flights (list of lineIds per aircraft).
- * Works for both the CURRENT state and the PROPOSED one.
+ * Compute metrics for a set of flights (with take-off times) per aircraft. Crucially
+ * the offer is measured PER DAY: the game regenerates demand every day and meters it
+ * per day, so a route is served only up to `dailyDemand` EACH day and anything above
+ * is oversupply. (The old weekly-only metric hid exactly the bug we are fixing.)
+ * Works for both the CURRENT state (real planningList) and the PROPOSED one.
  */
 export function computeMetrics(
-  flightsByAircraft: { aircraftId: number; lineIds: number[] }[],
+  flightsByAircraft: { aircraftId: number; flights: FlightRef[] }[],
   fleet: FleetIndex,
   lines: Map<number, Line>,
 ): Metrics {
-  const offered: Record<number, Record<CabinClass, number>> = {};
+  // offeredByDay[lineId][day][class] = seats offered departing that day.
+  const offeredByDay = new Map<number, Record<CabinClass, number>[]>();
   let totalFlights = 0;
   let flying = 0;
   let idle = 0;
   const utils: number[] = [];
 
-  for (const { aircraftId, lineIds } of flightsByAircraft) {
+  for (const { aircraftId, flights } of flightsByAircraft) {
     const a = fleet.get(aircraftId);
     if (!a) continue;
-    if (lineIds.length > 0) flying++;
+    if (flights.length > 0) flying++;
     else idle++;
     let used = 0;
-    for (const lineId of lineIds) {
-      const line = lines.get(lineId);
+    const cap = capacityOf(a);
+    for (const f of flights) {
+      const line = lines.get(f.lineId);
       if (!line) continue;
       used += roundTripDuration(a, line);
-      const cap = capacityOf(a);
-      offered[lineId] ??= { eco: 0, bus: 0, first: 0, cargo: 0 };
-      for (const c of CLASSES) offered[lineId][c] += cap[c];
+      const day = Math.floor((f.takeOffTime % WEEK_SECONDS) / DAY_SECONDS);
+      let days = offeredByDay.get(f.lineId);
+      if (!days) {
+        days = Array.from({ length: DAYS_PER_WEEK }, zero);
+        offeredByDay.set(f.lineId, days);
+      }
+      // A round trip offers BOTH legs against the daily demand (matches the game).
+      for (const c of CLASSES) days[day][c] += cap[c] * LEGS_PER_ROUNDTRIP;
       totalFlights++;
     }
-    if (lineIds.length > 0) utils.push(Math.min(1, used / WEEK_SECONDS));
+    if (flights.length > 0) utils.push(Math.min(1, used / WEEK_SECONDS));
   }
 
   utils.sort((x, y) => x - y);
@@ -78,22 +98,31 @@ export function computeMetrics(
     first: { offered: 0, demand: 0, served: 0 },
     cargo: { offered: 0, demand: 0, served: 0 },
   };
+  const perLine: Metrics["perLine"] = new Map();
   let servedValue = 0;
-  for (const [lineId, line] of lines) {
-    const off = offered[lineId];
-    for (const c of CLASSES) {
-      const o = off?.[c] ?? 0;
-      const d = line.weeklyDemand[c];
-      const served = Math.min(o, d);
-      coverage[c].offered += o;
-      coverage[c].demand += d;
-      coverage[c].served += served;
-      servedValue += served * line.price[c] * LEGS_PER_ROUNDTRIP;
-    }
-  }
+  let oversupply = 0;
 
-  const perLine = new Map<number, Record<CabinClass, number>>();
-  for (const lineId in offered) perLine.set(Number(lineId), offered[lineId]);
+  for (const [lineId, line] of lines) {
+    const days = offeredByDay.get(lineId);
+    const offered = zero();
+    const served = zero();
+    const over = zero();
+    for (const c of CLASSES) {
+      const daily = line.dailyDemand[c];
+      for (let d = 0; d < DAYS_PER_WEEK; d++) {
+        const o = days?.[d][c] ?? 0;
+        offered[c] += o;
+        served[c] += Math.min(o, daily); // capped by THAT day's demand
+        over[c] += Math.max(0, o - daily); // seats above that day's demand
+      }
+      coverage[c].offered += offered[c];
+      coverage[c].demand += line.weeklyDemand[c];
+      coverage[c].served += served[c];
+      servedValue += served[c] * line.price[c]; // served already counts both legs
+      if (c !== "cargo") oversupply += over[c];
+    }
+    if (days) perLine.set(lineId, { offered, served, over });
+  }
 
   return {
     fleetUtil: flying ? utilSum / flying : 0,
@@ -105,6 +134,7 @@ export function computeMetrics(
     idle,
     totalFlights,
     servedValue,
+    oversupply,
     coverage,
     perLine,
   };
@@ -188,7 +218,7 @@ export function printHubSummary(aircraft: Aircraft[], lines: Map<number, Line>):
   for (const l of lines.values()) {
     const g = byHub.get(l.hubId);
     if (!g) continue;
-    g.over += l.over.eco + l.over.bus + l.over.first;
+    for (let d = 0; d < DAYS_PER_WEEK; d++) g.over += l.over[d].eco + l.over[d].bus + l.over[d].first;
   }
 
   console.log(
@@ -216,9 +246,10 @@ export function printComparison(before: Metrics, after: Metrics): void {
   row("Minimum utilization", pct(before.utilMin), pct(after.utilMin));
   row("p10 utilization (worst 10%)", pct(before.utilP10), pct(after.utilP10));
   row("Aircraft >= 99% util", `${before.near100}/${before.flying}`, `${after.near100}/${after.flying}`);
+  row("Per-day pax OVERSUPPLY", fmt(before.oversupply), fmt(after.oversupply));
   row("Served value / week", money(before.servedValue), money(after.servedValue));
   console.log(`  ${hr("─").slice(2)}`);
-  console.log(`  Demand coverage (served / demand):`);
+  console.log(`  Demand coverage (served / demand, per-day capped):`);
   for (const c of CLASSES) {
     const b = before.coverage[c];
     const a = after.coverage[c];
@@ -241,31 +272,32 @@ const signed = (n: number) => (n >= 0 ? `+${fmt(n)}` : fmt(n));
  * check none blows up, and how much eco demand is left free.
  */
 export function printOversupply(after: Metrics, lines: Map<number, Line>, n = 12): void {
-  console.log(`\n${hr("═")}\n  OVERSUPPLY PER ROUTE (offer − demand)  ·  "not too negative" check\n${hr("═")}`);
+  console.log(`\n${hr("═")}\n  PER-DAY OVERSUPPLY PER ROUTE (seats above that day's demand, summed over the week)\n${hr("═")}`);
   const rows = [...lines.values()].map((l) => {
-    const off = after.perLine.get(l.id) ?? { eco: 0, bus: 0, first: 0, cargo: 0 };
-    const over = (c: CabinClass) => off[c] - l.weeklyDemand[c];
-    const totalOver = over("eco") + over("bus") + over("first");
-    return { l, off, over, totalOver };
+    const pl = after.perLine.get(l.id);
+    const over = pl?.over ?? zero();
+    const served = pl?.served ?? zero();
+    const totalOver = over.eco + over.bus + over.first;
+    return { l, over, served, totalOver };
   });
 
   const most = [...rows].filter((r) => r.totalOver > 0).sort((a, b) => b.totalOver - a.totalOver);
-  console.log(`  Most oversupplied (seats above eco/bus/first demand):`);
-  if (most.length === 0) console.log("    (no oversupplied route)");
+  console.log(`  Most oversupplied (empty seats flown above per-day demand):`);
+  if (most.length === 0) console.log("    (no per-day oversupply — every flight serves real demand)");
   for (const r of most.slice(0, n)) {
     console.log(
-      `    ${r.l.name.padEnd(13)} eco ${signed(r.over("eco")).padStart(7)}  bus ${signed(r.over("bus")).padStart(6)}  ` +
-        `fst ${signed(r.over("first")).padStart(5)}`,
+      `    ${r.l.name.padEnd(13)} eco ${signed(r.over.eco).padStart(7)}  bus ${signed(r.over.bus).padStart(6)}  ` +
+        `fst ${signed(r.over.first).padStart(5)}`,
     );
   }
 
   const free = [...rows]
-    .map((r) => ({ name: r.l.name, ecoFree: r.l.weeklyDemand.eco - r.off.eco }))
+    .map((r) => ({ name: r.l.name, ecoFree: r.l.weeklyDemand.eco - r.served.eco }))
     .filter((r) => r.ecoFree > 0)
     .sort((a, b) => b.ecoFree - a.ecoFree);
   const freeTotal = free.reduce((s, r) => s + r.ecoFree, 0);
   console.log(`  ${hr("─").slice(2)}`);
-  console.log(`  Uncovered ECO demand: ${fmt(freeTotal)} seats across ${free.length} routes (room for more aircraft).`);
+  console.log(`  Uncovered ECO demand: ${fmt(freeTotal)} seats/week across ${free.length} routes (room for more aircraft).`);
 }
 
 /** Per-aircraft detail of the proposed plan (first N). */

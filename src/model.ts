@@ -1,4 +1,4 @@
-import { DEFAULT_TURNAROUND, DEMAND_DAYS, PRICING, TIME_GRANULARITY, WEEK_SECONDS } from "./config.ts";
+import { DAYS_PER_WEEK, DEFAULT_TURNAROUND, PRICING, TIME_GRANULARITY, WEEK_SECONDS } from "./config.ts";
 import type {
   Aircraft,
   CabinClass,
@@ -94,18 +94,27 @@ export function buildModel(payloads: PlanningPayload[]): {
       // foreign routes (e.g. "MIA / GRU" when loading GRU) which must be dropped.
       if (raw.airportOneId !== payload.hubAirportId) continue;
       if (lines.has(raw.id)) continue;
+      // Demand is DAILY (paxAtt*). Keep 7 independent daily pools so a flight only
+      // ever consumes the day it departs on — that is what caps per-day oversupply.
+      const dailyDemand: Record<CabinClass, number> = {
+        eco: raw.paxAttEco,
+        bus: raw.paxAttBus,
+        first: raw.paxAttFirst,
+        cargo: raw.paxAttCargo,
+      };
       const weeklyDemand: Record<CabinClass, number> = {
-        eco: raw.paxAttEco * DEMAND_DAYS,
-        bus: raw.paxAttBus * DEMAND_DAYS,
-        first: raw.paxAttFirst * DEMAND_DAYS,
-        cargo: raw.paxAttCargo * DEMAND_DAYS,
+        eco: dailyDemand.eco * DAYS_PER_WEEK,
+        bus: dailyDemand.bus * DAYS_PER_WEEK,
+        first: dailyDemand.first * DAYS_PER_WEEK,
+        cargo: dailyDemand.cargo * DAYS_PER_WEEK,
       };
       lines.set(raw.id, {
         ...raw,
         hubId: payload.hubAirportId,
+        dailyDemand,
         weeklyDemand,
-        remaining: { ...weeklyDemand },
-        over: { eco: 0, bus: 0, first: 0, cargo: 0 },
+        remaining: Array.from({ length: DAYS_PER_WEEK }, () => ({ ...dailyDemand })),
+        over: Array.from({ length: DAYS_PER_WEEK }, () => ({ eco: 0, bus: 0, first: 0, cargo: 0 })),
         price: {
           eco: priceFor("eco", raw.distance),
           bus: priceFor("bus", raw.distance),
@@ -119,7 +128,7 @@ export function buildModel(payloads: PlanningPayload[]): {
       aircraft.push({
         ...raw,
         turnaround: inferTurnaround(raw),
-        freeTime: WEEK_SECONDS,
+        cursor: 0,
         assigned: [],
       });
     }
@@ -138,14 +147,14 @@ export function linesByHub(lines: Map<number, Line>): Map<number, Line[]> {
   return idx;
 }
 
-/** Reset the model's mutable state (demand and time) to re-optimize. */
+/** Reset the model's mutable state (per-day demand and schedule) to re-optimize. */
 export function resetModel(lines: Map<number, Line>, aircraft: Aircraft[]): void {
   for (const line of lines.values()) {
-    line.remaining = { ...line.weeklyDemand };
-    line.over = { eco: 0, bus: 0, first: 0, cargo: 0 };
+    line.remaining = Array.from({ length: DAYS_PER_WEEK }, () => ({ ...line.dailyDemand }));
+    line.over = Array.from({ length: DAYS_PER_WEEK }, () => ({ eco: 0, bus: 0, first: 0, cargo: 0 }));
   }
   for (const a of aircraft) {
-    a.freeTime = WEEK_SECONDS;
+    a.cursor = 0;
     a.assigned = [];
   }
 }

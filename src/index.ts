@@ -80,7 +80,7 @@ async function main() {
   // ── CURRENT state (from the real planningList) ──────────────────────────────────
   const beforeFlights = aircraft.map((a) => ({
     aircraftId: a.id,
-    lineIds: a.planningList.map((p) => p.lineId),
+    flights: a.planningList.map((p) => ({ lineId: p.lineId, takeOffTime: p.takeOffTime })),
   }));
   const before = computeMetrics(beforeFlights, fleet, lines);
 
@@ -89,7 +89,10 @@ async function main() {
   const { plans, totalFlights } = optimize(aircraft, lines);
 
   // ── PROPOSED state ──────────────────────────────────────────────────────────────
-  const afterFlights = plans.map((p) => ({ aircraftId: p.aircraftId, lineIds: p.added.map((f) => f.lineId) }));
+  const afterFlights = plans.map((p) => ({
+    aircraftId: p.aircraftId,
+    flights: p.added.map((f) => ({ lineId: f.lineId, takeOffTime: f.takeOffTime })),
+  }));
   const after = computeMetrics(afterFlights, fleet, lines);
 
   printComparison(before, after);

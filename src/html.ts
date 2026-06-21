@@ -1,4 +1,4 @@
-import { WEEK_SECONDS } from "./config.ts";
+import { DAY_SECONDS, DAYS_PER_WEEK, LEGS_PER_ROUNDTRIP, WEEK_SECONDS } from "./config.ts";
 import { capacityOf, roundTripDuration } from "./model.ts";
 import type { Aircraft, CabinClass, Line, ProposedFlight } from "./types.ts";
 
@@ -33,16 +33,27 @@ export function buildHubHtml(
 ): string {
   const hubLines = [...lines.values()].filter((l) => hubAircraft[0] && l.hubId === hubAircraft[0].hubId);
 
-  // ── Offer per route (from the proposed plan) ─────────────────────────────────
+  // ── Offer per route (from the proposed plan), bucketed by DEPARTURE DAY ───────
+  // The game meters demand per day, so weekly totals can look fine while a single
+  // day is oversupplied. We track per-day offer to flag the worst day per route.
   const offered = new Map<number, Record<CabinClass, number>>();
+  const offeredByDay = new Map<number, Record<CabinClass, number>[]>();
   const flightsPerLine = new Map<number, number>();
   for (const a of hubAircraft) {
     const plan = plansById.get(a.id) ?? [];
     const cap = capacityOf(a);
     for (const f of plan) {
       const o = offered.get(f.lineId) ?? { eco: 0, bus: 0, first: 0, cargo: 0 };
-      for (const c of CLASSES) o[c] += cap[c];
+      // A round trip offers BOTH legs against the daily demand (matches the game).
+      for (const c of CLASSES) o[c] += cap[c] * LEGS_PER_ROUNDTRIP;
       offered.set(f.lineId, o);
+      let days = offeredByDay.get(f.lineId);
+      if (!days) {
+        days = Array.from({ length: DAYS_PER_WEEK }, () => ({ eco: 0, bus: 0, first: 0, cargo: 0 }));
+        offeredByDay.set(f.lineId, days);
+      }
+      const day = Math.floor((f.takeOffTime % WEEK_SECONDS) / DAY_SECONDS);
+      for (const c of CLASSES) days[day][c] += cap[c] * LEGS_PER_ROUNDTRIP;
       flightsPerLine.set(f.lineId, (flightsPerLine.get(f.lineId) ?? 0) + 1);
     }
   }
@@ -144,11 +155,14 @@ export function buildHubHtml(
   const routeRows = hubLines
     .map((l) => {
       const o = offered.get(l.id) ?? { eco: 0, bus: 0, first: 0, cargo: 0 };
+      const days = offeredByDay.get(l.id);
       const cell = (c: CabinClass) => {
-        const d = l.weeklyDemand[c];
-        const diff = o[c] - d;
-        const cls = diff > 0 ? "over" : "under";
-        return `<td class="${cls}"><b>${fmt(o[c])}</b> / ${fmt(d)}<span class="d">${diff >= 0 ? "+" : ""}${fmt(diff)}</span></td>`;
+        const dd = l.dailyDemand[c]; // per-day demand (what the game caps against)
+        let worstOver = 0;
+        if (days) for (let d = 0; d < DAYS_PER_WEEK; d++) worstOver = Math.max(worstOver, days[d][c] - dd);
+        const cls = worstOver > 0 ? "over" : "under";
+        const note = worstOver > 0 ? `worst day +${fmt(worstOver)}` : "ok";
+        return `<td class="${cls}"><b>${fmt(o[c])}</b> / ${fmt(l.weeklyDemand[c])}<span class="d">${note}</span></td>`;
       };
       return `<tr>
         <td><span class="dot" style="background:${l.color || "#999"}"></span>${esc(l.name)}</td>
@@ -250,11 +264,11 @@ export function buildHubHtml(
   </div>
   <div class="aclist">${timeline}</div>
 
-  <h2>Routes — weekly offer / demand (gray = below demand, red = oversupply)</h2>
+  <h2>Routes — weekly offer / demand (gray = within per-day demand, red = a day is oversupplied)</h2>
   <table>
     <thead><tr><th>Route</th><th class="n">km</th><th class="n">flights</th><th>Eco</th><th>Business</th><th>First</th><th>Cargo (t)</th></tr></thead>
     <tbody>${routeRows}</tbody>
   </table>
-  <div class="note">Each cell: <b>offered</b> / weekly demand, and the difference (+ = oversupply).</div>
+  <div class="note">Each cell: <b>weekly offered</b> / weekly demand, then the worst single-day oversupply. The game regenerates and caps demand <b>per day</b>, so red means at least one day flies empty seats above that day's demand.</div>
 </div></body></html>`;
 }
