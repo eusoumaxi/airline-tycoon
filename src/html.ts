@@ -1,6 +1,6 @@
 import { BUY_CATALOG, DAY_SECONDS, DAYS_PER_WEEK, LEGS_PER_ROUNDTRIP, WEEK_SECONDS } from "./config.ts";
 import { capacityOf, roundTripDuration } from "./model.ts";
-import type { BuyOrder, HubAdvice, SurplusAction } from "./recommend.ts";
+import type { BuyOrder, HubAdvice } from "./recommend.ts";
 import type { Aircraft, CabinClass, Line, ProposedFlight } from "./types.ts";
 
 const CLASSES: CabinClass[] = ["eco", "bus", "first", "cargo"];
@@ -60,24 +60,18 @@ export function buildHubHtml(
     }
   }
 
-  // ── Utilization before/after ─────────────────────────────────────────────────
-  let beforeSum = 0,
-    afterSum = 0,
-    flying = 0;
+  // ── Utilization per aircraft (current planning vs proposed plan) ─────────────
+  let flying = 0;
   const rows = hubAircraft
     .map((a) => {
       const before = utilOf(a.planningList.map((p) => (lines.get(p.lineId) ? roundTripDuration(a, lines.get(p.lineId)!) : 0)));
       const plan = plansById.get(a.id) ?? [];
       const after = utilOf(plan.map((f) => (lines.get(f.lineId) ? roundTripDuration(a, lines.get(f.lineId)!) : 0)));
-      beforeSum += before;
-      afterSum += after;
       if (plan.length) flying++;
       return { a, before, after, plan };
     })
     .sort((x, y) => y.after - x.after);
 
-  const before = hubAircraft.length ? beforeSum / hubAircraft.length : 0;
-  const after = hubAircraft.length ? afterSum / hubAircraft.length : 0;
   const idleRows = rows.filter((r) => r.plan.length === 0);
 
   // ── Route legend (game color) ────────────────────────────────────────────────
@@ -133,6 +127,7 @@ export function buildHubHtml(
   };
 
   const timeline = rows
+    .filter((r) => r.plan.length > 0) // only aircraft that actually fly; idle ones get their own section
     .map(({ a, before, after, plan }) => {
       const routes = [...new Set(plan.map((f) => f.lineId))]
         .map((id) => `${esc(lines.get(id)?.name ?? String(id))}×${plan.filter((f) => f.lineId === id).length}`)
@@ -154,109 +149,101 @@ export function buildHubHtml(
     })
     .join("");
 
-  const routeRows = hubLines
-    .map((l) => {
-      const o = offered.get(l.id) ?? { eco: 0, bus: 0, first: 0, cargo: 0 };
-      const days = offeredByDay.get(l.id);
-      const cell = (c: CabinClass) => {
-        const dd = l.dailyDemand[c]; // per-day demand (what the game caps against)
-        let worstOver = 0;
-        if (days) for (let d = 0; d < DAYS_PER_WEEK; d++) worstOver = Math.max(worstOver, days[d][c] - dd);
-        const cls = worstOver > 0 ? "over" : "under";
-        const note = worstOver > 0 ? `worst day +${fmt(worstOver)}` : "ok";
-        return `<td class="${cls}"><b>${fmt(o[c])}</b> / ${fmt(l.weeklyDemand[c])}<span class="d">${note}</span></td>`;
-      };
-      return `<tr>
-        <td><span class="dot" style="background:${l.color || "#999"}"></span>${esc(l.name)}</td>
-        <td class="n">${fmt(l.distance)}</td>
-        <td class="n">${flightsPerLine.get(l.id) ?? 0}</td>
-        ${cell("eco")}${cell("bus")}${cell("first")}${cell("cargo")}
-      </tr>`;
-    })
-    .join("");
-
   const flights = [...flightsPerLine.values()].reduce((s, n) => s + n, 0);
 
-  // ── Decisions panel: shopping list (modern aircraft + config) ─────────────────
+  // ── Coverage now → after buying the recommended fleet ─────────────────────────
+  const covCls = (c: number) => (c < 0.5 ? "bad" : c < 0.9 ? "mid" : "ok");
+  const covNow = advice.demand.eco ? advice.servedNow.eco / advice.demand.eco : 1;
+  const ecoAfter = Math.max(0, advice.demand.eco - advice.residual.eco);
+  const covAfter = advice.demand.eco ? ecoAfter / advice.demand.eco : 1;
+  const cargoNow = advice.demand.cargo ? advice.servedNow.cargo / advice.demand.cargo : 1;
+  const cargoAfter = advice.demand.cargo ? Math.max(0, advice.demand.cargo - advice.residual.cargo) / advice.demand.cargo : 1;
+  const investment = advice.buyOrders.reduce((s, o) => s + o.totalPrice, 0);
+  const toBuy = advice.buyOrders.reduce((s, o) => s + o.count, 0);
+  const paxNow = advice.demand.eco + advice.demand.bus + advice.demand.first - (advice.servedNow.eco + advice.servedNow.bus + advice.servedNow.first);
+  const paxAfter = advice.residual.eco + advice.residual.bus + advice.residual.first;
+
+  // ── BUY PLAN — what to buy + what each aircraft actually carries ───────────────
   const seatChips = (c: { eco: number; bus: number; first: number; cargo: number }) =>
     `<div class="seats"><span class="seat eco">${fmt(c.eco)} eco</span><span class="seat bus">${fmt(c.bus)} bus</span>` +
     `<span class="seat fst">${fmt(c.first)} first</span><span class="seat cgo">${fmt(c.cargo)}t cargo</span></div>`;
+  const loadLine = (o: HubAdvice["buyOrders"][number]) =>
+    o.cargoLed
+      ? `Each one hauls ≈ <b>${fmt(o.loadPerAircraft.cargo)} t</b> cargo/week`
+      : `Each one carries ≈ <b>${fmt(o.loadPerAircraft.eco)}</b> eco · ${fmt(o.loadPerAircraft.bus)} bus · ${fmt(o.loadPerAircraft.first)} first · ${fmt(o.loadPerAircraft.cargo)} t belly /week`;
 
   const buyHtml = advice.buyOrders.length
     ? `<div class="buy">${advice.buyOrders
         .map(
-          (o) => `<div class="buyc">
-        <div class="bt"><b>Buy ${o.count}× ${esc(o.model.model)}</b><span class="tag">cat ${o.model.cat} · ${fmt(o.model.range)}km</span><span class="price">$${fmt(o.totalPrice)}</span></div>
-        ${seatChips(o.config)}
-        <div class="stats"><span class="st">▮ util <b>${pct(o.util)}</b></span><span class="st">↗ profit/wk <b>${fmt(o.profit)}</b><i>*</i></span><span class="st">${o.cargoLed ? `${fmt(o.config.cargo * o.count)}t/trip cap` : `serves <b>${fmt(o.uncoveredEco)}</b> eco/wk`}</span></div>
-        <div class="why">Config tuned to ${esc(hubCode)}'s demand. Flies: ${esc(o.routes.slice(0, 5).join(", "))}${o.routes.length > 5 ? ` +${o.routes.length - 5} more` : ""}</div>
+          (o) => `<div class="buyc ${o.cargoLed ? "cgo" : "pax"}">
+        <div class="bt"><b>Buy ${o.count}× ${esc(o.model.model)}</b><span class="tag">${o.cargoLed ? "freighter · " : ""}cat ${o.model.cat} · ${fmt(o.model.range)}km</span><span class="price">$${fmt(o.totalPrice)}</span></div>
+        <div class="cfglbl">Set this config (sliders) →</div>${seatChips(o.config)}
+        <div class="load">${loadLine(o)} · <span class="util">util ${pct(o.util)}</span></div>
+        <div class="why">Flies: ${esc(o.routes.slice(0, 6).join(", "))}${o.routes.length > 6 ? ` +${o.routes.length - 6} more` : ""}</div>
       </div>`,
         )
         .join("")}</div>
-      <div class="note" style="margin-top:6px"><i>*</i> profit is the simulator's weekly value on RELATIVE prices (order is right; absolute € is illustrative — the game is ~30× higher). These counts come from running the real optimizer on the new aircraft, so they're profit-validated (only aircraft that fly profitably are bought).</div>`
-    : `<div class="why" style="color:var(--mut)">No new aircraft needed at ${esc(hubCode)} — current demand is covered (any idle aircraft are surplus, see below).</div>`;
+      <div class="note" style="margin-top:8px">Counts &amp; routes come from running the <b>real optimizer</b> on these new aircraft (profit-validated — only planes that fly profitably are bought). “Set config” is what you slide on the buy screen; “each carries” is what it actually fills.</div>`
+    : `<div class="why" style="color:var(--mut)">No new aircraft needed at ${esc(hubCode)} — the current fleet already covers the profitable demand.</div>`;
 
   const smallGapHtml = advice.smallRouteGap.length
-    ? `<div class="warnbox">⚠ ${advice.smallRouteGap.length} route(s) need a <b>small aircraft</b> (category too low for the A350/A321 — route cat &lt; 5): ${esc(
+    ? `<div class="warnbox">⚠ <b>${advice.smallRouteGap.length} route(s) need a SMALL aircraft</b> (category too low for the A350/A321 — route cat &lt; 5): ${esc(
         advice.smallRouteGap
-          .slice(0, 12)
+          .slice(0, 10)
           .map((g) => `${g.line.name} (cat ${g.line.category}, ${fmt(g.uncovered.eco)} eco/wk)`)
           .join(", "),
-      )}${advice.smallRouteGap.length > 12 ? ` +${advice.smallRouteGap.length - 12} more` : ""}. Keep a narrowbody like the B727 for these.</div>`
+      )}${advice.smallRouteGap.length > 10 ? ` +${advice.smallRouteGap.length - 10} more` : ""}. These stay unfilled until you add a narrowbody like the B727.</div>`
     : "";
 
-  const bellyCreditHtml =
-    advice.bellyCreditTons > 0
-      ? `<div class="note" style="margin-top:8px">📦 Freighter count already <b>credits ${fmt(advice.bellyCreditTons)} t/week</b> that the newly-bought passenger fleet carries in its belly — so this isn't double-counted.</div>`
-      : "";
-
-  const bellyTons = advice.bellyCargo.reduce((s, b) => s + b.tons, 0);
   const bellyHtml = advice.bellyCargo.length
-    ? `<div class="warnbox" style="background:#0e2433;border-color:#1f5a7a;color:#9fd4e8">📦 ${fmt(bellyTons)} t/week of cargo on ${advice.bellyCargo.length} long route(s) has <b>no freighter with the range</b> (A330P2F reaches ${fmt(6850)}km). Carry it in the <b>belly of the A350-900ULR</b> you fly there (44 t) — bump its cargo slider.</div>`
+    ? `<div class="warnbox" style="background:#0e2433;border-color:#1f5a7a;color:#9fd4e8">📦 ${fmt(advice.bellyCargo.reduce((s, b) => s + b.tons, 0))} t/week of cargo on ${advice.bellyCargo.length} long route(s) has <b>no freighter with the range</b> (A330P2F reaches 6,850km). It's carried in the <b>belly of the A350-900ULR</b> instead (44 t).</div>`
     : "";
 
-  // ── Surplus aircraft → action ─────────────────────────────────────────────────
-  const surplusHtml = advice.surplus.length
-    ? `<table><thead><tr><th>Idle aircraft</th><th class="n">cat</th><th class="n">range</th><th>Current config</th><th>Recommended action</th></tr></thead><tbody>
-    ${advice.surplus
-      .map(
-        (s) => `<tr>
-        <td><b>${s.count}× ${esc(s.model)}</b></td>
-        <td class="n">${s.cat}</td><td class="n">${fmt(s.range)}</td>
-        <td class="fillc">${s.seats.eco}/${s.seats.bus}/${s.seats.first} +${s.seats.cargo}t</td>
-        <td><div class="actbox act-${s.action.kind}">${esc(s.action.text)}${s.alt ? `<span class="alt">${esc(s.alt)}</span>` : ""}</div></td>
-      </tr>`,
-      )
-      .join("")}
-    </tbody></table>`
-    : `<div class="why" style="color:var(--mut)">No idle aircraft — every plane at ${esc(hubCode)} is flying.</div>`;
-
-  // ── Underserved routes (least covered) ────────────────────────────────────────
+  // ── Routes — demand, what's missing now, and what's left AFTER buying ─────────
   const fillLabel = (u: HubAdvice["underserved"][number]) => {
-    if (u.fill.reuseIdle) return `Assign idle ${esc(u.fill.reuseIdle.model)} (${u.fill.reuseIdle.available} free)`;
-    if (u.fill.buyModel) return `Buy ${esc(u.fill.buyModel.model)}${u.fill.cargoLed ? " (freighter)" : ` (cat ${u.fill.buyModel.cat})`}`;
-    if (u.fill.note === "belly-cargo") return `Cargo in pax belly (no freighter reaches)`;
-    if (u.fill.note === "low-cat") return `⚠ needs small aircraft (cat ≤ ${u.line.category})`;
-    if (u.fill.note === "no-reach") return `⚠ too far for any catalog aircraft`;
+    if (u.fill.reuseIdle) return `↻ assign idle ${esc(u.fill.reuseIdle.model)} you own`;
+    if (u.fill.buyModel) return `🛒 ${esc(u.fill.buyModel.model)}${u.fill.cargoLed ? " (freighter)" : ""}`;
+    if (u.fill.note === "belly-cargo") return `📦 A350 belly (no freighter reaches)`;
+    if (u.fill.note === "low-cat") return `⚠ small aircraft (cat ≤ ${u.line.category})`;
+    if (u.fill.note === "no-reach") return `⚠ too far for any model`;
     return "—";
   };
-  const covCls = (c: number) => (c < 0.5 ? "bad" : c < 0.9 ? "mid" : "ok");
-  const underservedHtml = advice.underserved.length
-    ? `<table><thead><tr><th>Route</th><th class="n">cat</th><th class="n">km</th><th class="n">eco covered</th><th class="n">uncovered eco</th><th class="n">bus</th><th class="n">first</th><th class="n">cargo t</th><th>Fill with</th></tr></thead><tbody>
+  const miss = (v: Record<string, number>) =>
+    `<b>${fmt(v.eco)}</b><span class="sub2"> +${fmt(v.bus)}b ${fmt(v.first)}f ${fmt(v.cargo)}t</span>`;
+  const SHOW = 40;
+  const routesHtml = advice.underserved.length
+    ? `<table class="rt"><thead><tr><th>Route</th><th class="n">cat</th><th class="n">km</th><th class="n">eco demand</th><th class="n">covered now</th><th class="n">missing now</th><th>fill with</th><th class="n">missing after buy</th></tr></thead><tbody>
     ${advice.underserved
-      .slice(0, 30)
-      .map(
-        (u) => `<tr>
+      .slice(0, SHOW)
+      .map((u) => {
+        const res = u.residual ?? u.uncovered;
+        const okAfter = res.eco + res.bus + res.first + res.cargo < 1;
+        return `<tr>
         <td><span class="dot" style="background:${u.line.color || "#999"}"></span>${esc(u.line.name)}</td>
         <td class="n">${u.line.category}</td><td class="n">${fmt(u.line.distance)}</td>
+        <td class="n">${fmt(u.line.weeklyDemand.eco)}</td>
         <td class="n"><span class="cov ${covCls(u.coverageEco)}">${pct(u.coverageEco)}</span></td>
-        <td class="gap">${fmt(u.uncovered.eco)}</td><td class="n">${fmt(u.uncovered.bus)}</td><td class="n">${fmt(u.uncovered.first)}</td><td class="n">${fmt(u.uncovered.cargo)}</td>
+        <td class="n gap">${miss(u.uncovered)}</td>
         <td class="fillc">${fillLabel(u)}</td>
-      </tr>`,
-      )
+        <td class="n ${okAfter ? "okc" : "gap"}">${okAfter ? "✓ covered" : miss(res)}</td>
+      </tr>`;
+      })
       .join("")}
-    </tbody></table>${advice.underserved.length > 30 ? `<div class="note">… and ${advice.underserved.length - 30} more underserved routes.</div>` : ""}`
-    : `<div class="why" style="color:var(--mut)">Every route at ${esc(hubCode)} is fully served. 🎉</div>`;
+    </tbody></table>${advice.underserved.length > SHOW ? `<div class="note">… and ${advice.underserved.length - SHOW} more underserved routes (see the totals above).</div>` : ""}`
+    : `<div class="why" style="color:var(--mut)">Every route at ${esc(hubCode)} is fully served by the current fleet. 🎉</div>`;
+
+  // ── Current fleet: split FLYING (grid) vs IDLE (with the reason why) ──────────
+  const idleHtml = advice.surplus.length
+    ? `<div class="idle">${advice.surplus
+        .map(
+          (s) => `<div class="idlec">
+        <div class="bt"><b>${s.count}× ${esc(s.model)}</b><span class="tag idle-tag">IDLE · cat ${s.cat} · ${fmt(s.range)}km</span><span class="cfg2">${s.seats.eco}/${s.seats.bus}/${s.seats.first} +${s.seats.cargo}t</span></div>
+        <div class="why2"><b>Why idle:</b> ${esc(s.reason)}</div>
+        <div class="actbox act-${s.action.kind}"><b>Do:</b> ${esc(s.action.text)}${s.alt ? `<span class="alt">${esc(s.alt)}</span>` : ""}</div>
+      </div>`,
+        )
+        .join("")}</div>`
+    : `<div class="why" style="color:var(--mut)">No idle aircraft — every plane you own at ${esc(hubCode)} is flying.</div>`;
 
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -334,6 +321,24 @@ export function buildHubHtml(
   td.fillc{font-size:12px}
   .cov{display:inline-block;min-width:42px;font-variant-numeric:tabular-nums;font-weight:700}
   .cov.bad{color:var(--lo)}.cov.mid{color:var(--mid)}.cov.ok{color:var(--hi)}
+  td.okc{color:var(--hi);font-weight:700}
+  .sub2{color:var(--mut);font-size:10px;font-weight:400}
+  /* coverage cards with before→after */
+  .c .v .ar{color:var(--mut);font-weight:400;margin:0 4px}
+  .c .v .to{color:var(--hi)}
+  .buyc.pax{border-color:#2f6e4a}.buyc.cgo{border-color:#1f5a7a}
+  .cfglbl{font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px}
+  .buyc .load{font-size:12px;color:var(--mut);margin-bottom:7px}.buyc .load b{color:var(--tx)}.buyc .util{color:#6fb0ff;font-weight:600}
+  /* idle cards */
+  .idle{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:12px}
+  .idlec{background:#1a1622;border:1px solid #5a3a5a;border-radius:11px;padding:13px 15px}
+  .idlec .bt{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;margin-bottom:7px}
+  .idle-tag{background:#3a2440;color:#e0a8e0}
+  .cfg2{margin-left:auto;color:var(--mut);font-size:11px;font-variant-numeric:tabular-nums}
+  .why2{font-size:12.5px;margin-bottom:7px;line-height:1.5}.why2 b{color:#e0a8e0}
+  .rt th,.rt td{padding:6px 8px}
+  .badge{display:inline-block;font-size:10px;font-weight:700;padding:2px 8px;border-radius:6px;margin-left:8px;vertical-align:middle}
+  .badge.own{background:#143a27;color:#5be39a}.badge.idle{background:#3a2440;color:#e0a8e0}
   .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:middle}
   .note{color:var(--mut);font-size:12px;margin-top:8px}
   .ctrls{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
@@ -341,37 +346,31 @@ export function buildHubHtml(
   .ctrls button:hover{background:#212a3e;border-color:#37507e}
   .ctrls #flt{flex:1;min-width:180px;background:#0a0e17;color:var(--tx);border:1px solid var(--ln);border-radius:7px;padding:7px 12px;font-size:12px}
 </style></head><body><div class="wrap">
-  <h1>Planning ${esc(hubCode)} — how it would look after the readjustment</h1>
-  <div class="sub">${hubAircraft.length} aircraft · ${hubLines.length} routes · ${fmt(flights)} flights/week · NO change has been sent to the game</div>
+  <h1>${esc(hubCode)} — fleet plan: what to fill, what to buy</h1>
+  <div class="sub">${hubAircraft.length} aircraft you own · ${hubLines.length} routes · ${fmt(flights)} flights/week · read-only (nothing sent to the game)</div>
 
   <div class="cards">
-    <div class="c"><div class="k">Average utilization</div><div class="v">${pct(after)} <small>was ${pct(before)}</small></div></div>
-    <div class="c"><div class="k">Flying aircraft</div><div class="v">${flying}<small> / ${hubAircraft.length}</small></div></div>
-    <div class="c"><div class="k">Idle aircraft</div><div class="v ${idleRows.length ? "warn" : ""}">${idleRows.length}</div></div>
-    <div class="c"><div class="k">Unserved eco / week</div><div class="v ${advice.uncoveredEcoSeats ? "warn" : ""}">${fmt(advice.uncoveredEcoSeats)}</div></div>
-    <div class="c"><div class="k">Unserved cargo / week</div><div class="v ${advice.uncoveredCargoTons ? "warn" : ""}">${fmt(advice.uncoveredCargoTons)}<small> t</small></div></div>
+    <div class="c"><div class="k">Eco demand covered</div><div class="v"><span class="cov ${covCls(covNow)}">${pct(covNow)}</span><span class="ar">→</span><span class="to">${pct(covAfter)}</span></div></div>
+    <div class="c"><div class="k">Unserved pax / week</div><div class="v">${fmt(paxNow)}<span class="ar">→</span><span class="to">${fmt(paxAfter)}</span></div></div>
+    <div class="c"><div class="k">Cargo covered</div><div class="v"><span class="cov ${covCls(cargoNow)}">${pct(cargoNow)}</span><span class="ar">→</span><span class="to">${pct(cargoAfter)}</span></div></div>
+    <div class="c"><div class="k">Your fleet</div><div class="v">${flying}<small> flying · ${idleRows.length} idle</small></div></div>
+    <div class="c"><div class="k">To buy</div><div class="v">${fmt(toBuy)}<small> aircraft · $${fmt(investment)}</small></div></div>
   </div>
 
   <div class="panel">
-    <h2>🛒 Shopping list — modern aircraft to buy for ${esc(hubCode)} (config tuned to demand)</h2>
+    <h2>🛒 Buy plan — what to buy for ${esc(hubCode)}, and what each plane carries</h2>
     ${buyHtml}
-    ${bellyCreditHtml}
     ${smallGapHtml}
     ${bellyHtml}
-    <div class="note">Buy on the dashboard, set the hub to <b>${esc(hubCode)}</b>, then apply the seat config above (the game shows the same eco/bus/first/cargo sliders — the config is computed from <b>${esc(hubCode)}</b>'s own demand mix, not a fixed default). Counts are the estimate to <b>fully cover</b> the uncovered demand — a ceiling; buy incrementally and re-run to schedule them.</div>
+    <div class="note">After buying all of the above: eco coverage <b>${pct(covNow)} → ${pct(covAfter)}</b>, unserved pax <b>${fmt(paxNow)} → ${fmt(paxAfter)}</b>/week. Set the hub to <b>${esc(hubCode)}</b> on the buy screen and slide the config shown; buy incrementally and re-run to schedule them.</div>
   </div>
 
-  <div class="panel">
-    <h2>♻️ Surplus aircraft at ${esc(hubCode)} (${idleRows.length} idle) — what to do with them</h2>
-    ${surplusHtml}
-  </div>
+  <h2>📊 Routes — demand, what's missing now, and what's left AFTER buying</h2>
+  <div class="note" style="margin-bottom:10px">The routes you own, sorted by the demand you're losing. <b>missing now</b> = what the current fleet can't cover (eco big, then +bus/first/cargo); <b>missing after buy</b> = what's STILL uncovered once you buy the plan above.</div>
+  ${routesHtml}
 
-  <h2>📉 Underserved routes — least-covered demand (sorted by lost value)</h2>
-  <div class="note" style="margin-bottom:10px">These routes can't cover their demand with the current fleet. "Fill with" tells you whether to reuse an idle aircraft you own or buy a modern one.</div>
-  ${underservedHtml}
-
-  <h2>Weekly planning per aircraft — click to expand the grid (Mon→Sun × 0-23h)</h2>
-  <div class="note" style="margin-bottom:10px">Each row is an aircraft (collapsed). Expand it to see its week day by day, Current vs Proposed side by side; each colored block is a flight (color = game route), placed by departure time and duration.</div>
+  <h2>✈️ Your current fleet — ${flying} flying <span class="badge own">OWNED</span></h2>
+  <div class="note" style="margin-bottom:10px">Existing aircraft only (the new ones above don't exist yet). Expand a row to see its week, Current vs Proposed schedule side by side.</div>
   <div class="ctrls">
     <button onclick="document.querySelectorAll('.acd').forEach(d=>d.open=true)">▾ Expand all</button>
     <button onclick="document.querySelectorAll('.acd').forEach(d=>d.open=false)">▸ Collapse all</button>
@@ -379,12 +378,9 @@ export function buildHubHtml(
   </div>
   <div class="aclist">${timeline}</div>
 
-  <h2>Routes — weekly offer / demand (gray = within per-day demand, red = a day is oversupplied)</h2>
-  <table>
-    <thead><tr><th>Route</th><th class="n">km</th><th class="n">flights</th><th>Eco</th><th>Business</th><th>First</th><th>Cargo (t)</th></tr></thead>
-    <tbody>${routeRows}</tbody>
-  </table>
-  <div class="note">Each cell: <b>weekly offered</b> / weekly demand, then the worst single-day oversupply. The game regenerates and caps demand <b>per day</b>, so red means at least one day flies empty seats above that day's demand.</div>
+  <h2>💤 Idle aircraft — ${idleRows.length} not used <span class="badge idle">WHY?</span></h2>
+  <div class="note" style="margin-bottom:10px">Aircraft you own that the optimizer leaves on the ground — each with the REASON and what to do about it.</div>
+  ${idleHtml}
 </div></body></html>`;
 }
 

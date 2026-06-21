@@ -265,7 +265,11 @@ function bellyFor(m: BuyModel, routes: UnderservedRoute[]): number {
  * report what it actually used. Mutates `hubLines` scheduling state (fine: it runs
  * after the report's served metrics are already captured).
  */
-function simulateBuys(hubId: number, hubLines: Line[], underserved: UnderservedRoute[]): { buyOrders: BuyOrder[]; bellyCreditTons: number } {
+function simulateBuys(
+  hubId: number,
+  hubLines: Line[],
+  underserved: UnderservedRoute[],
+): { buyOrders: BuyOrder[]; bellyCreditTons: number; residual: Record<CabinClass, number>; residualByLine: Map<number, Record<CabinClass, number>> } {
   const nameOf = new Map(hubLines.map((l) => [l.id, l.name]));
   // Each applicable model: its demand-tuned config + a per-route aircraft-equivalents
   // estimate (the basis for the pool cap).
@@ -286,7 +290,17 @@ function simulateBuys(hubId: number, hubLines: Line[], underserved: UnderservedR
     }
     models.push({ m, config, equiv });
   }
-  if (models.length === 0) return { buyOrders: [], bellyCreditTons: 0 };
+  if (models.length === 0) {
+    const residual = zero();
+    const residualByLine = new Map<number, Record<CabinClass, number>>();
+    for (const l of hubLines) {
+      const r = zero();
+      for (const day of l.remaining) for (const c of CLASSES) r[c] += day[c];
+      residualByLine.set(l.id, r);
+      for (const c of CLASSES) residual[c] += r[c];
+    }
+    return { buyOrders: [], bellyCreditTons: 0, residual, residualByLine };
+  }
 
   // Snapshot the LEFTOVER per-day demand so we can re-run with bigger pools if a cap binds.
   const snap = hubLines.map((l) => l.remaining.map((d) => ({ ...d })));
@@ -416,7 +430,19 @@ export function buildHubAdvice(args: {
   underserved.sort((a, b) => b.uncoveredValue - a.uncoveredValue);
 
   // ── Shopping list — by SIMULATION (build the aircraft, let the optimizer fly them) ──
-  const { buyOrders, bellyCreditTons } = simulateBuys(hubId, hubLines, underserved);
+  const { buyOrders, bellyCreditTons, residual, residualByLine } = simulateBuys(hubId, hubLines, underserved);
+  for (const u of underserved) u.residual = residualByLine.get(u.line.id);
+
+  // Hub-total demand vs served-now (all routes) — for the coverage before → after.
+  const demand = zero();
+  const servedNow = zero();
+  for (const line of hubLines) {
+    const s = servedByLine.get(line.id) ?? zero();
+    for (const c of CLASSES) {
+      demand[c] += line.weeklyDemand[c];
+      servedNow[c] += s[c];
+    }
+  }
 
   // ── Surplus (idle) aircraft → what to do ────────────────────────────────────
   const surplus: SurplusGroup[] = [];
@@ -461,7 +487,19 @@ export function buildHubAdvice(args: {
     } else {
       action = { kind: "surplus", text: `Genuinely surplus — no route here or nearby uses it. Buy a high-category route (cat ≥ ${a.category}) with demand, or sell.` };
     }
-    surplus.push({ model, cat: a.category, range: a.range, count: list.length, ids: list.map((x) => x.id), seats, action, alt });
+    // WHY is it idle? (the user wants the reason, not just the fix)
+    const flyable = hubLines.filter((l) => l.category >= a.category && a.range >= l.distance);
+    const ecoLeft = flyable.filter((l) => l.weeklyDemand.eco - (servedByLine.get(l.id)?.eco ?? 0) > 0);
+    const cargoLeft = flyable.filter((l) => l.weeklyDemand.cargo - (servedByLine.get(l.id)?.cargo ?? 0) > 0);
+    let reason: string;
+    if (flyable.length === 0) reason = `Too big: category ${a.category} fits NONE of this hub's ${hubLines.length} routes (its airports are too small for it).`;
+    else if (flyable.length / hubLines.length < 0.5)
+      reason = `Too big: category ${a.category} only reaches ${flyable.length} of ${hubLines.length} routes (the biggest airports), and their demand is already covered by the rest of the fleet.`;
+    else if (ecoLeft.length === 0 && cargoLeft.length > 0)
+      reason = `Its routes' passenger demand is already fully served — only CARGO is left, which a passenger cabin can't take. Reconfigure it for cargo.`;
+    else if (ecoLeft.length === 0) reason = `Its routes are already fully served — no remaining demand it can fly.`;
+    else reason = `Surplus of the pyramid: the flying is concentrated on fewer aircraft; what's left for this one is below break-even (would fly half-empty and lose money + wear).`;
+    surplus.push({ model, cat: a.category, range: a.range, count: list.length, ids: list.map((x) => x.id), seats, action, alt, reason });
   }
 
   return {
@@ -470,6 +508,7 @@ export function buildHubAdvice(args: {
     total: hubAircraft.length,
     flying: hubAircraft.length - idleAircraft.length,
     idle: idleAircraft.length,
+    routeCount: hubLines.length,
     underserved,
     buyOrders,
     smallRouteGap,
@@ -478,5 +517,8 @@ export function buildHubAdvice(args: {
     uncoveredCargoTons,
     uncoveredEcoSeats,
     bellyCreditTons,
+    demand,
+    servedNow,
+    residual,
   };
 }
