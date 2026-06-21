@@ -91,7 +91,12 @@ export async function fetchAllPlannings(planningIds: number[]): Promise<Planning
 // ───────────────────────────────────────────────────────────────────────────
 export async function updatePlanning(plan: AircraftPlan): Promise<unknown> {
   const url = `${BASE_URL}/network/planning/0/ajax`;
-  const planningData = JSON.stringify({ aircraftId: plan.aircraftId, added: plan.added });
+  // An empty `added` CLEARS the aircraft's planning (body without the `added` key,
+  // matching the game's "clear" request) — used to truly idle a surplus aircraft.
+  const planningData =
+    plan.added.length > 0
+      ? JSON.stringify({ aircraftId: plan.aircraftId, added: plan.added })
+      : JSON.stringify({ aircraftId: plan.aircraftId });
   const res = await fetch(url, {
     method: "POST",
     headers: {

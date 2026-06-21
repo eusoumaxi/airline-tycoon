@@ -13,53 +13,6 @@ import type { Aircraft, AircraftPlan, CabinClass, Line } from "./types.ts";
 
 const CLASSES: CabinClass[] = ["eco", "bus", "first", "cargo"];
 
-/** Heap entry: key (profit density), aircraft id and epoch (for invalidation). */
-interface HeapEntry {
-  key: number;
-  id: number;
-  epoch: number;
-}
-
-/** Simple binary max-heap by `key`. */
-class MaxHeap {
-  private h: HeapEntry[] = [];
-  get size(): number {
-    return this.h.length;
-  }
-  push(e: HeapEntry): void {
-    const h = this.h;
-    h.push(e);
-    let i = h.length - 1;
-    while (i > 0) {
-      const p = (i - 1) >> 1;
-      if (h[p].key >= h[i].key) break;
-      [h[p], h[i]] = [h[i], h[p]];
-      i = p;
-    }
-  }
-  pop(): HeapEntry | undefined {
-    const h = this.h;
-    if (h.length === 0) return undefined;
-    const top = h[0];
-    const last = h.pop()!;
-    if (h.length > 0) {
-      h[0] = last;
-      let i = 0;
-      for (;;) {
-        const l = 2 * i + 1;
-        const r = l + 1;
-        let m = i;
-        if (l < h.length && h[l].key > h[m].key) m = l;
-        if (r < h.length && h[r].key > h[m].key) m = r;
-        if (m === i) break;
-        [h[m], h[i]] = [h[i], h[m]];
-        i = m;
-      }
-    }
-    return top;
-  }
-}
-
 /**
  * PROFIT of ONE round trip of `a` on `line` DEPARTING on `day`, given the current
  * per-day demand. A flight's cost is treated as a fixed share of a FULL flight's
@@ -178,35 +131,46 @@ function commitTrip(a: Aircraft, m: Move): void {
 }
 
 /**
- * Greedy allocation, DAY-AWARE and BALANCED across the fleet.
+ * Greedy allocation, DAY-AWARE and CONCENTRATED into a "pyramid".
  *
- * We always advance the aircraft that is FURTHEST BEHIND in the week (smallest
- * cursor) and give it the densest profitable flight available for its current day.
- * Because all aircraft march through time together, they share each day's demand
- * evenly and reach similar utilisation — no aircraft is packed solid while another
- * sits empty (the player wants every aircraft used, spread across routes). Each
- * aircraft still picks its OWN best route per day, so as a route's daily demand
- * fills up its density drops and the next aircraft naturally moves to another route.
+ * We fill ONE aircraft to its maximum (its whole week, day by day, with the best
+ * profitable flights) BEFORE starting the next one. So flying piles onto as few
+ * aircraft as possible: the most efficient run at ~100%, the next a bit less, and
+ * the SURPLUS aircraft are left completely UNUSED — free to move to another hub or
+ * reconfigure for cargo. (The player explicitly does NOT want many aircraft each at
+ * 50%; they want a 100 / 99 / 99 / … / 0 pyramid.)
  *
- * The min-cursor key is exact (an aircraft's cursor only changes when IT flies), so
- * no stale-entry bookkeeping is needed: pop the earliest, fly one leg, re-insert.
+ * Aircraft are ordered by the best profit density they can reach at full demand, so
+ * the most capable fill first (and become the most-used), and the routes only a
+ * small aircraft can serve are left for it. Oversupply is fine as long as the seats
+ * that DO sell pay for the flight — that is exactly the profit test in roundTripValue.
  */
 function greedyAllocate(aircraft: Aircraft[], hubLines: Line[]): void {
   const fleet = aircraft.filter((a) => !(SKIP_RENTALS && a.isRental));
-  const byId = new Map(fleet.map((a) => [a.id, a]));
 
-  // MaxHeap keyed by -cursor ⇒ pops the aircraft with the EARLIEST cursor first.
-  const heap = new MaxHeap();
-  for (const a of fleet) {
-    if (bestMoveFor(a, hubLines)) heap.push({ key: -a.cursor, id: a.id, epoch: 0 });
-  }
+  // SCARCITY-AWARE MATCHING + pyramid order. Before an aircraft "burns" a route we
+  // must respect that the route may be the ONLY thing another aircraft can fly. So
+  // we process the MOST CONSTRAINED aircraft first (fewest flyable routes): it
+  // claims its scarce routes before a flexible aircraft consumes them, so no
+  // aircraft that COULD fly ends up stranded — maximum fleet usability. Among
+  // equally-constrained aircraft the most efficient (best density) goes first, so
+  // usage still concentrates into a pyramid (most-used → least-used → unused).
+  const options = new Map<number, number>(); // aircraft id -> how many routes it can fly
+  for (const a of fleet) options.set(a.id, hubLines.reduce((n, l) => n + (canFly(a, l) ? 1 : 0), 0));
 
-  for (let top = heap.pop(); top; top = heap.pop()) {
-    const a = byId.get(top.id)!;
-    const move = bestMoveFor(a, hubLines);
-    if (!move) continue; // nothing profitable left for this aircraft -> it stops (idle tail)
-    commitTrip(a, move); // advances a.cursor
-    heap.push({ key: -a.cursor, id: a.id, epoch: 0 }); // re-queue at its new (later) position
+  const order = fleet
+    .map((a) => ({ a, opt: options.get(a.id)!, density: bestMoveFor(a, hubLines)?.density ?? -Infinity }))
+    // most-constrained first, then most-efficient; id breaks ties so the SAME
+    // aircraft always fills first and the SAME surplus one stays idle (stable wear).
+    .sort((x, y) => x.opt - y.opt || y.density - x.density || x.a.id - y.a.id)
+    .map((x) => x.a);
+
+  // Fill each aircraft to the brim before the next: keep taking its best profitable
+  // flight until none is left (demand exhausted for it, or its week is full).
+  for (const a of order) {
+    for (let move = bestMoveFor(a, hubLines); move; move = bestMoveFor(a, hubLines)) {
+      commitTrip(a, move);
+    }
   }
 }
 

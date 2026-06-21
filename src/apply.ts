@@ -52,11 +52,17 @@ async function main() {
   const codeOf = new Map<number, string>();
   for (const l of lines.values()) if (!codeOf.has(l.hubId)) codeOf.set(l.hubId, l.name.split(" / ")[0]);
   const hubOf = new Map<number, number>(aircraft.map((a) => [a.id, a.hubId]));
+  const acById = new Map(aircraft.map((a) => [a.id, a]));
 
-  // Aircraft of the target hubs that have at least one flight in the plan.
+  // Target-hub aircraft to push: those with a new plan, PLUS those that currently
+  // have a planning but should now be IDLE — we push them an empty plan to CLEAR it,
+  // so a surplus aircraft (the bottom of the pyramid) really stops flying instead of
+  // keeping its old schedule. Aircraft already idle and staying idle are skipped.
   const selected = plans.filter((p) => {
     const hub = hubOf.get(p.aircraftId);
-    return p.added.length > 0 && hub !== undefined && targets.includes(codeOf.get(hub) ?? "");
+    if (hub === undefined || !targets.includes(codeOf.get(hub) ?? "")) return false;
+    const hadPlanning = (acById.get(p.aircraftId)?.planningList.length ?? 0) > 0;
+    return p.added.length > 0 || hadPlanning;
   });
 
   console.log(`\nTarget hub(s): ${targets.join(", ")}`);
@@ -67,7 +73,9 @@ async function main() {
   for (const plan of selected) {
     i++;
     const hub = codeOf.get(hubOf.get(plan.aircraftId)!) ?? "?";
-    const line = `[${i}/${selected.length}] ${hub} · aircraft ${plan.aircraftId} · ${plan.added.length} flights · ${summarize(plan, lines)}`;
+    const what =
+      plan.added.length > 0 ? `${plan.added.length} flights · ${summarize(plan, lines)}` : "CLEAR → set idle";
+    const line = `[${i}/${selected.length}] ${hub} · aircraft ${plan.aircraftId} · ${what}`;
 
     if (!live) {
       console.log("DRY  " + line);

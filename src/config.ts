@@ -112,7 +112,7 @@ export const LEGS_PER_ROUNDTRIP = 2;
 // fly more. These are scale-free ratios, so they don't depend on price tuning.
 
 /** Break-even load (revenue-weighted) for a PASSENGER aircraft. From accounting ≈0.15. */
-export const BREAK_EVEN_LOAD = 0.45;
+export const BREAK_EVEN_LOAD = 0.15;
 
 /** Break-even load for a CARGO aircraft (freighter) — higher cost share. ≈0.37. */
 export const BREAK_EVEN_LOAD_CARGO = 0.37;
