@@ -1,0 +1,16 @@
+{
+  "name": "airline-tycoon-slots",
+  "version": "1.0.0",
+  "description": "Optimizador automatico de slots de aviones para Airlines Manager (tycoon.airlines-manager.com)",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "optimize": "bun run src/index.ts",
+    "fetch": "bun run src/index.ts --fetch-only",
+    "offline": "bun run src/index.ts --offline"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  }
+}
