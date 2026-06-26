@@ -28,7 +28,7 @@ export const USER_AGENT =
  * REMEMBERME + PHPSESSID are what authenticate you; AWSALB rotates on its own.
  */
 export const COOKIE =
-  "REMEMBERME=Am.GameBundle.Entity.Player%3AZGF2aWRtYXhpbWlsaWFub2xhcmFAZ21haWwuY29t%3A1813540149%3A5_bC4xxNLHKJqqonMg9NPyv2k3Ps0DA5GAzkNjuXKe0~_iVMxwVlDK2RKU6CaDRqc10vC4D2fgz5joB6YspV75U~; PHPSESSID=4rfcb31qiq79blfd60qtvsal7r";
+  "REMEMBERME=Am.GameBundle.Entity.Player%3AZGF2aWRtYXhpbWlsaWFub2xhcmFAZ21haWwuY29t%3A1813725321%3Ajo-Myzsbq8GruJkDpj53o_Qs_iwVMfO1m9ZishMQ3HI~_iVMxwVlDK2RKU6CaDRqc10vC4D2fgz5joB6YspV75U~; PHPSESSID=mqahdlgf4j7l1rhqi1bmk6e0va";
 
 // ───────────────────────────────────────────────────────────────────────────
 // Apply / update (used by `bun run apply`)
@@ -41,9 +41,10 @@ export const COOKIE =
  */
 export const APPLY_HUBS = ["GRU"];
 
-/** Random delay between each aircraft update (ms). Looks human, avoids rate limits. */
-export const MIN_DELAY_MS = 1_000; // 1 s
-export const MAX_DELAY_MS = 1_000; // 1 s
+/** DEPRECATED — apply.ts no longer delays between updates: it fires `--concurrency`
+ *  requests at once (default 100) with NO interval. Kept only for reference. */
+export const MIN_DELAY_MS = 0;
+export const MAX_DELAY_MS = 0;
 
 // ───────────────────────────────────────────────────────────────────────────
 // Game mechanics (calibrated from the real data)
@@ -111,11 +112,71 @@ export const LEGS_PER_ROUNDTRIP = 2;
 // wear). Raise these to fly fewer / fuller flights (protect the fleet); lower to
 // fly more. These are scale-free ratios, so they don't depend on price tuning.
 
-/** Break-even load (revenue-weighted) for a PASSENGER aircraft. From accounting ≈0.15. */
+/** Break-even load (revenue-weighted) for a PASSENGER aircraft. From accounting ≈0.15.
+ *  NOTE: break-even is NO LONGER an optimisation gate — the objective is eco coverage
+ *  (see ECO_TARGET). It is kept only to compute the reporting-only profit figure. */
 export const BREAK_EVEN_LOAD = 0.15;
 
 /** Break-even load for a CARGO aircraft (freighter) — higher cost share. ≈0.37. */
 export const BREAK_EVEN_LOAD_CARGO = 0.37;
+
+/**
+ * ECO COVERAGE TARGET — now a REPORTING KPI only (no longer an optimisation gate).
+ * The reports show "routes ≥ this fraction of eco served" as a quality marker. The
+ * optimizer used to STOP serving a route at this fraction to cap the eco "burst", but
+ * the player reversed that ("la idea es full llénalo"): routes are now filled to the
+ * brim and the only hard rule is the per-day overshoot cap below. See `ECO_OVERSHOOT_CAP`.
+ */
+export const ECO_TARGET = 0.98;
+
+/**
+ * MAX ECO OVERSHOOT per route per DAY (seats). THE player's one hard rule:
+ *   "lo único que debe evitar es que alguna ruta tenga más de −1500 eco por día."
+ * Filling is greedy on eco coverage: an aircraft keeps taking a route while that route
+ * still has POSITIVE eco demand left that day, and the flight that crosses zero is allowed
+ * to overshoot the demand (coarse seats → the game shows the day's remaining go negative).
+ * This cap bounds that overshoot: a flight is SKIPPED if it would drive the route+day's eco
+ * below −CAP (i.e. would push the day's eco oversupply above CAP) — that means the aircraft
+ * is too big for this route's residual, so it's left for a route where it fits. Once a route's
+ * eco for the day is exhausted the aircraft moves to ANOTHER route still with eco that day.
+ * This REPLACES the old ECO_TARGET=98% stop: we now serve to 100%+ (bounded overshoot) instead
+ * of stopping 2% short. Raise for fuller planes + more burst; lower to cut oversupply waste.
+ */
+export const ECO_OVERSHOOT_CAP = 1500;
+
+/**
+ * MAX CARGO OVERSHOOT per route per DAY (tons) for FREIGHTERS — the cargo analogue of
+ * `ECO_OVERSHOOT_CAP` (the player: "haz lo mismo para los aviones de cargo… llena el máximo
+ * avión posible"). Generous by default so a freighter always gets to fill a route's cargo to
+ * the brim; it only guards against dropping a big freighter onto a route with a tiny cargo
+ * residual. Lower it to cap freighter oversupply more aggressively (like eco). (Passenger
+ * belly cargo is NOT gated by this — a pax aircraft optimises eco; its belly just rides along.)
+ */
+export const CARGO_OVERSHOOT_CAP = 600;
+
+/**
+ * AIRCRAFT UTILISATION FLOOR. No flying aircraft may sit below this: the optimizer
+ * fills each one as full as possible and, if it still can't clear the floor, GROUNDS
+ * it (better empty than half-used — the player's rule "no aircraft under 94%"). It is
+ * enforced by iteratively grounding the worst sub-floor aircraft and refilling, so the
+ * freed eco is re-absorbed by the survivors (they get fuller) — a clean 100/99/…/94/0
+ * pyramid with no half-used tail. Trade-off: the eco that can't be packed into a ≥floor
+ * aircraft is left UNSERVED, so some routes drop below ECO_TARGET. Set to 0 to disable.
+ * EXCEPTION: a plane "long-haul-maxed" (can't fit another round trip of its longest route —
+ * e.g. 4× a 33.75h route = 80%, no room for a 5th) is NOT grounded; a long route caps a
+ * dedicated plane below this floor and that's full, not waste (it's combined with whatever
+ * other routes' eco still fits). The floor only grounds planes that genuinely had room for more.
+ */
+export const UTIL_FLOOR = 0.85;
+
+/**
+ * SELL THRESHOLD. A route whose eco coverage ends BELOW this in the simulation is not
+ * worth serving: the optimizer STOPS using it (frees its aircraft for routes it can
+ * actually fill) and the report flags it as a SELL candidate. The player's rule: "if a
+ * route falls under 70% in the simulation, don't use it — sell it." Dropping a route only
+ * frees capacity, so the kept routes climb toward ECO_TARGET. Set to 0 to never drop/sell.
+ */
+export const SELL_THRESHOLD = 0.7;
 
 /** Number of TIGHTEN passes (grow-swap + gap-fill) that push toward more profit. */
 export const TIGHTEN_ROUNDS = 4;

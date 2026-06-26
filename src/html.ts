@@ -1,4 +1,4 @@
-import { BUY_CATALOG, DAY_SECONDS, DAYS_PER_WEEK, LEGS_PER_ROUNDTRIP, WEEK_SECONDS } from "./config.ts";
+import { BUY_CATALOG, DAY_SECONDS, DAYS_PER_WEEK, ECO_TARGET, LEGS_PER_ROUNDTRIP, SELL_THRESHOLD, WEEK_SECONDS } from "./config.ts";
 import { capacityOf, roundTripDuration } from "./model.ts";
 import type { BuyOrder, HubAdvice } from "./recommend.ts";
 import type { Aircraft, CabinClass, Line, ProposedFlight } from "./types.ts";
@@ -82,7 +82,8 @@ export function buildHubHtml(
   const hourTicks = Array.from({ length: 9 }, (_, i) => i * 3)
     .map((h) => `<span class="hr" style="left:${(h / 24) * 100}%">${h}</span>`)
     .join("");
-  const hourLines = Array.from({ length: 24 }, (_, h) => `<i style="left:${(h / 24) * 100}%"></i>`).join("");
+  // Hourly gridlines are drawn with a CSS repeating gradient on .dtrack (NOT 24 DOM
+  // nodes per row) — with thousands of aircraft that was ~1.6M elements / tens of MB.
 
   /**
    * Weekly 7-day x 24h grid for an aircraft (flights = colored game blocks).
@@ -121,7 +122,7 @@ export function buildHubHtml(
           return `<div class="seg" style="left:${left}%;width:${w}%;background:${iv.col}" title="${iv.title}"><span>${lbl}</span></div>`;
         })
         .join("");
-      return `<div class="drow"><span class="dl">${dname}</span><div class="dtrack">${hourLines}${segs}</div></div>`;
+      return `<div class="drow"><span class="dl">${dname}</span><div class="dtrack">${segs}</div></div>`;
     }).join("");
     return `<div class="gwrap"><div class="glabel">${label}</div><div class="grid"><div class="ghead"><span class="dl"></span><div class="hticks">${hourTicks}</div></div>${dayRows}</div></div>`;
   };
@@ -162,6 +163,31 @@ export function buildHubHtml(
   const toBuy = advice.buyOrders.reduce((s, o) => s + o.count, 0);
   const paxNow = advice.demand.eco + advice.demand.bus + advice.demand.first - (advice.servedNow.eco + advice.servedNow.bus + advice.servedNow.first);
   const paxAfter = advice.residual.eco + advice.residual.bus + advice.residual.first;
+
+  // ── ECO FILL — THE OBJECTIVE: how much of each route's eco demand the plan serves ─
+  // (Business/First/Cargo just ride along; the optimizer only chases eco, target ECO_TARGET.)
+  const ecoServedByLine = new Map<number, number>();
+  for (const l of hubLines) {
+    const days = offeredByDay.get(l.id);
+    let s = 0;
+    for (let d = 0; d < DAYS_PER_WEEK; d++) s += Math.min(days?.[d].eco ?? 0, l.dailyDemand.eco);
+    ecoServedByLine.set(l.id, s);
+  }
+  const ecoRoutes = hubLines.filter((l) => l.weeklyDemand.eco > 0);
+  const hubEcoDemand = ecoRoutes.reduce((s, l) => s + l.weeklyDemand.eco, 0);
+  const hubEcoServed = ecoRoutes.reduce((s, l) => s + (ecoServedByLine.get(l.id) ?? 0), 0);
+  const hubEcoFill = hubEcoDemand ? hubEcoServed / hubEcoDemand : 1;
+  const routesAtTarget = ecoRoutes.filter((l) => (ecoServedByLine.get(l.id) ?? 0) / l.weeklyDemand.eco >= ECO_TARGET).length;
+  const ecoTargetPct = `${Math.round(ECO_TARGET * 100)}%`;
+  const ecoCls = (c: number) => (c >= ECO_TARGET ? "ok" : c >= 0.8 ? "mid" : "bad");
+  const underservedByLine = new Map(advice.underserved.map((u) => [u.line.id, u]));
+  // Eco fill per route, WORST-covered first (the objective). Routes stuck below SELL_THRESHOLD
+  // are the SELL candidates — the optimizer stopped using them (freed their aircraft).
+  const ecoRouteRows = ecoRoutes
+    .map((l) => ({ l, served: ecoServedByLine.get(l.id) ?? 0, cov: (ecoServedByLine.get(l.id) ?? 0) / l.weeklyDemand.eco }))
+    .sort((a, b) => a.cov - b.cov);
+  const sellPct = `${Math.round(SELL_THRESHOLD * 100)}%`;
+  const sellRoutes = ecoRouteRows.filter((r) => r.cov < SELL_THRESHOLD);
 
   // ── BUY PLAN — what to buy + what each aircraft actually carries ───────────────
   const seatChips = (c: { eco: number; bus: number; first: number; cargo: number }) =>
@@ -208,29 +234,51 @@ export function buildHubHtml(
     if (u.fill.note === "no-reach") return `⚠ too far for any model`;
     return "—";
   };
-  const miss = (v: Record<string, number>) =>
-    `<b>${fmt(v.eco)}</b><span class="sub2"> +${fmt(v.bus)}b ${fmt(v.first)}f ${fmt(v.cargo)}t</span>`;
-  const SHOW = 40;
-  const routesHtml = advice.underserved.length
-    ? `<table class="rt"><thead><tr><th>Route</th><th class="n">cat</th><th class="n">km</th><th class="n">eco demand</th><th class="n">covered now</th><th class="n">missing now</th><th>fill with</th><th class="n">missing after buy</th></tr></thead><tbody>
-    ${advice.underserved
-      .slice(0, SHOW)
-      .map((u) => {
-        const res = u.residual ?? u.uncovered;
-        const okAfter = res.eco + res.bus + res.first + res.cargo < 1;
+  // Eco fill per route table — built from ecoRouteRows (computed above, worst-first).
+  const routesHtml = ecoRouteRows.length
+    ? `<table class="rt"><thead><tr><th>Route</th><th class="n">cat</th><th class="n">km</th><th class="n">eco demand</th><th class="n">eco served</th><th class="n">eco fill</th><th>if &lt; ${ecoTargetPct}: fill with</th><th class="n">eco left after buy</th></tr></thead><tbody>
+    ${ecoRouteRows
+      .map(({ l, served, cov }) => {
+        const u = underservedByLine.get(l.id);
+        const below = cov < ECO_TARGET;
+        const res = u?.residual;
+        const afterCell = !below ? `<span class="okc">✓</span>` : res ? (res.eco < 1 ? `<span class="okc">✓</span>` : `<span class="gap">${fmt(res.eco)}</span>`) : "—";
         return `<tr>
-        <td><span class="dot" style="background:${u.line.color || "#999"}"></span>${esc(u.line.name)}</td>
-        <td class="n">${u.line.category}</td><td class="n">${fmt(u.line.distance)}</td>
-        <td class="n">${fmt(u.line.weeklyDemand.eco)}</td>
-        <td class="n"><span class="cov ${covCls(u.coverageEco)}">${pct(u.coverageEco)}</span></td>
-        <td class="n gap">${miss(u.uncovered)}</td>
-        <td class="fillc">${fillLabel(u)}</td>
-        <td class="n ${okAfter ? "okc" : "gap"}">${okAfter ? "✓ covered" : miss(res)}</td>
+        <td><span class="dot" style="background:${l.color || "#999"}"></span>${esc(l.name)}</td>
+        <td class="n">${l.category}</td><td class="n">${fmt(l.distance)}</td>
+        <td class="n">${fmt(l.weeklyDemand.eco)}</td>
+        <td class="n">${fmt(served)}</td>
+        <td class="n"><span class="cov ${ecoCls(cov)}">${pct(cov)}</span></td>
+        <td class="fillc">${below ? (u ? fillLabel(u) : "—") : ""}</td>
+        <td class="n">${afterCell}</td>
       </tr>`;
       })
       .join("")}
-    </tbody></table>${advice.underserved.length > SHOW ? `<div class="note">… and ${advice.underserved.length - SHOW} more underserved routes (see the totals above).</div>` : ""}`
-    : `<div class="why" style="color:var(--mut)">Every route at ${esc(hubCode)} is fully served by the current fleet. 🎉</div>`;
+    </tbody></table>`
+    : `<div class="why" style="color:var(--mut)">No eco demand at ${esc(hubCode)}.</div>`;
+
+  // ── Routes to SELL — eco stuck below the sell threshold (optimizer stopped using them) ──
+  const sellHtml = sellRoutes.length
+    ? `<table class="rt"><thead><tr><th>Route</th><th class="n">cat</th><th class="n">km</th><th class="n">eco demand</th><th class="n">eco fill</th><th>verdict / alternative</th></tr></thead><tbody>
+    ${sellRoutes
+      .map(({ l, cov }) => {
+        const u = underservedByLine.get(l.id);
+        let verdict: string;
+        if (u?.fill.note === "no-reach") verdict = `<b class="sell">SELL</b> — too far for any aircraft you can buy`;
+        else if (u?.fill.note === "low-cat") verdict = `<b class="sell">SELL</b> — needs a smaller aircraft (route cat ${l.category}); none in catalog`;
+        else if (u) verdict = `<span class="keep">KEEP &amp; buy</span> ${fillLabel(u)} — or sell`;
+        else verdict = `<span class="keep">KEEP &amp; buy</span> not enough aircraft here — or sell`;
+        return `<tr>
+        <td><span class="dot" style="background:${l.color || "#999"}"></span>${esc(l.name)}</td>
+        <td class="n">${l.category}</td><td class="n">${fmt(l.distance)}</td>
+        <td class="n">${fmt(l.weeklyDemand.eco)}</td>
+        <td class="n"><span class="cov bad">${pct(cov)}</span></td>
+        <td class="fillc">${verdict}</td>
+      </tr>`;
+      })
+      .join("")}
+    </tbody></table>`
+    : `<div class="why" style="color:var(--mut)">No route falls below ${sellPct} eco — nothing to sell. 🎉</div>`;
 
   // ── Current fleet: split FLYING (grid) vs IDLE (with the reason why) ──────────
   const idleHtml = advice.surplus.length
@@ -288,8 +336,7 @@ export function buildHubHtml(
   .dl{width:30px;color:var(--mut);font-size:11px;flex:none;text-align:right}
   .hticks{position:relative;flex:1;height:13px}
   .hticks .hr{position:absolute;font-size:9px;color:#46527a;transform:translateX(-50%)}
-  .dtrack{position:relative;flex:1;height:18px;background:#0a0e17;border-radius:3px;border:1px solid var(--ln)}
-  .dtrack>i{position:absolute;top:0;height:100%;border-left:1px solid #161d30}
+  .dtrack{position:relative;flex:1;height:18px;background-color:#0a0e17;background-image:linear-gradient(90deg,#161d30 0 1px,transparent 1px);background-size:calc(100%/24) 100%;border-radius:3px;border:1px solid var(--ln)}
   .seg{position:absolute;top:1px;height:16px;border-radius:2px;overflow:hidden;display:flex;align-items:center;box-shadow:0 0 0 1px #0006 inset}
   .seg span{font-size:9px;color:#10151f;font-weight:700;padding:0 4px;white-space:nowrap}
   td.over{color:var(--lo)}td.under{color:var(--mut)}
@@ -321,6 +368,7 @@ export function buildHubHtml(
   td.fillc{font-size:12px}
   .cov{display:inline-block;min-width:42px;font-variant-numeric:tabular-nums;font-weight:700}
   .cov.bad{color:var(--lo)}.cov.mid{color:var(--mid)}.cov.ok{color:var(--hi)}
+  .sell{color:var(--lo);font-weight:700}.keep{color:#6fb0ff;font-weight:700}
   td.okc{color:var(--hi);font-weight:700}
   .sub2{color:var(--mut);font-size:10px;font-weight:400}
   /* coverage cards with before→after */
@@ -350,8 +398,10 @@ export function buildHubHtml(
   <div class="sub">${hubAircraft.length} aircraft you own · ${hubLines.length} routes · ${fmt(flights)} flights/week · read-only (nothing sent to the game)</div>
 
   <div class="cards">
-    <div class="c"><div class="k">Eco demand covered</div><div class="v"><span class="cov ${covCls(covNow)}">${pct(covNow)}</span><span class="ar">→</span><span class="to">${pct(covAfter)}</span></div></div>
-    <div class="c"><div class="k">Unserved pax / week</div><div class="v">${fmt(paxNow)}<span class="ar">→</span><span class="to">${fmt(paxAfter)}</span></div></div>
+    <div class="c"><div class="k">Eco filled (plan)</div><div class="v"><span class="cov ${ecoCls(hubEcoFill)}">${pct(hubEcoFill)}</span><span class="ar">→</span><span class="to">${pct(covAfter)}</span> <small>after buy</small></div></div>
+    <div class="c"><div class="k">Routes ≥${ecoTargetPct} eco</div><div class="v">${routesAtTarget}<small> / ${ecoRoutes.length}</small></div></div>
+    <div class="c"><div class="k">Routes to sell (&lt;${sellPct})</div><div class="v">${sellRoutes.length ? `<span class="sell">${sellRoutes.length}</span>` : "0"}<small> / ${ecoRoutes.length}</small></div></div>
+    <div class="c"><div class="k">Unserved eco / week</div><div class="v">${fmt(advice.demand.eco - advice.servedNow.eco)}<span class="ar">→</span><span class="to">${fmt(advice.residual.eco)}</span></div></div>
     <div class="c"><div class="k">Cargo covered</div><div class="v"><span class="cov ${covCls(cargoNow)}">${pct(cargoNow)}</span><span class="ar">→</span><span class="to">${pct(cargoAfter)}</span></div></div>
     <div class="c"><div class="k">Your fleet</div><div class="v">${flying}<small> flying · ${idleRows.length} idle</small></div></div>
     <div class="c"><div class="k">To buy</div><div class="v">${fmt(toBuy)}<small> aircraft · $${fmt(investment)}</small></div></div>
@@ -365,8 +415,12 @@ export function buildHubHtml(
     <div class="note">After buying all of the above: eco coverage <b>${pct(covNow)} → ${pct(covAfter)}</b>, unserved pax <b>${fmt(paxNow)} → ${fmt(paxAfter)}</b>/week. Set the hub to <b>${esc(hubCode)}</b> on the buy screen and slide the config shown; buy incrementally and re-run to schedule them.</div>
   </div>
 
-  <h2>📊 Routes — demand, what's missing now, and what's left AFTER buying</h2>
-  <div class="note" style="margin-bottom:10px">The routes you own, sorted by the demand you're losing. <b>missing now</b> = what the current fleet can't cover (eco big, then +bus/first/cargo); <b>missing after buy</b> = what's STILL uncovered once you buy the plan above.</div>
+  <h2>🏷️ Routes to sell — ${sellRoutes.length} stuck below ${sellPct} eco</h2>
+  <div class="note" style="margin-bottom:10px">The optimizer couldn't lift these to ${sellPct} eco with your fleet, so it <b>stopped using them</b> (freeing aircraft for routes it can fill). <b class="sell">SELL</b> = no catalog aircraft can serve it at all (category/range) — drop it. <span class="keep">KEEP &amp; buy</span> = it's only under-resourced; buy the aircraft shown to keep it, or sell it.</div>
+  ${sellHtml}
+
+  <h2>📊 Eco fill per route — % of each route's eco demand the plan serves (target ≥${ecoTargetPct})</h2>
+  <div class="note" style="margin-bottom:10px">Every route you own with eco demand, <b>worst-covered first</b>. The optimizer's ONLY objective is ECO: it fills each route to ${ecoTargetPct} then moves the aircraft on (business/first ride along; freighters are planned for cargo). Rows below ${ecoTargetPct} show what would fill them; <b>eco left after buy</b> = still short once you buy the plan above. Hub eco fill <b>${pct(hubEcoFill)}</b> · <b>${routesAtTarget}/${ecoRoutes.length}</b> routes already ≥${ecoTargetPct}.</div>
   ${routesHtml}
 
   <h2>✈️ Your current fleet — ${flying} flying <span class="badge own">OWNED</span></h2>

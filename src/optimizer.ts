@@ -1,11 +1,15 @@
 import {
   BREAK_EVEN_LOAD,
   BREAK_EVEN_LOAD_CARGO,
+  CARGO_OVERSHOOT_CAP,
   DAY_SECONDS,
   DAYS_PER_WEEK,
+  ECO_OVERSHOOT_CAP,
   LEGS_PER_ROUNDTRIP,
+  SELL_THRESHOLD,
   SKIP_RENTALS,
   TIME_GRANULARITY,
+  UTIL_FLOOR,
   WEEK_SECONDS,
 } from "./config.ts";
 import { canFly, capacityOf, linesByHub, roundTripDuration } from "./model.ts";
@@ -14,19 +18,15 @@ import type { Aircraft, AircraftPlan, CabinClass, Line } from "./types.ts";
 const CLASSES: CabinClass[] = ["eco", "bus", "first", "cargo"];
 
 /**
- * PROFIT of ONE round trip of `a` on `line` DEPARTING on `day`, given the current
- * per-day demand. A flight's cost is treated as a fixed share of a FULL flight's
- * revenue (the break-even load measured from real accounting), so:
- *   revenue     = Σ_class min(seats, remaining[day])·price      (seats it really fills)
- *   fullRevenue = Σ_class seats·price                           (a 100%-full flight)
- *   cost        = breakEven · fullRevenue                       (fuel + WEAR + fees)
- *   value       = (revenue − cost) · legs
- * The break-even is REVENUE-WEIGHTED across ALL classes, so a half-empty eco cabin
- * is subsidised by business/first/cargo — the flight only counts as a loss if the
- * WHOLE plane can't cover its (almost fixed) cost. If value <= 0 the flight is NOT
- * scheduled: better leave the aircraft idle than fly it at a loss (and wear it out).
- * Demand is per-day, so once a day's demand runs out the next flight there is
- * unprofitable and the optimizer moves to another day/route/aircraft.
+ * Per-class fill of ONE round trip of `a` on `line` DEPARTING on `day`, given the
+ * current per-day demand, plus a (reporting-only) profit `value`.
+ *   within  = Σ_class min(seats, remaining[day])   (seats it really fills that day)
+ *   over    = Σ_class seats − within               (empty seats = oversupply / burst)
+ *   value   = (revenue − cost) · already folded in here for the reports ONLY
+ * IMPORTANT: `value` (break-even profit) is NO LONGER the optimisation objective.
+ * The objective is ECO COVERAGE (see `bestMoveFor`): a flight is scheduled while it
+ * still fills real ECO demand and is scored by the eco seats it fills per second.
+ * `value` is kept purely so the reports/buy-simulator can still show a profit figure.
  */
 function roundTripValue(a: Aircraft, line: Line, day: number): {
   value: number;
@@ -64,10 +64,20 @@ interface Move {
   takeOffTime: number; // concrete take-off (s from week start, multiple of granularity)
   vStart: number; // virtual-clock position of this flight (for advancing the cursor)
   duration: number;
-  value: number;
-  density: number; // profit per second of aircraft time
+  value: number; // reporting-only profit (NOT the objective)
+  density: number; // PRIMARY-class seats filled per second of aircraft time (eco for pax, cargo for freighters)
   fillWithin: Record<CabinClass, number>;
   fillOver: Record<CabinClass, number>;
+}
+
+/** The class an aircraft optimises for: eco for passenger aircraft, cargo for freighters. */
+function primaryClassOf(a: Aircraft): CabinClass {
+  return a.isCargo ? "cargo" : "eco";
+}
+
+/** Max per-route-per-day overshoot allowed for this aircraft's primary class (seats / tons). */
+function overshootCapOf(a: Aircraft): number {
+  return a.isCargo ? CARGO_OVERSHOOT_CAP : ECO_OVERSHOOT_CAP;
 }
 
 const ceilTo = (t: number, g: number) => Math.ceil(t / g) * g;
@@ -98,20 +108,34 @@ function phaseOffset(id: number): number {
  * rest of that day stays idle — flying it would only oversupply). `vEnd` =
  * phase+WEEK bounds the aircraft to a single week.
  */
-function bestMoveFor(a: Aircraft, lines: Line[], vEnd: number): Move | null {
+function bestMoveFor(a: Aircraft, candLines: Line[], vEnd: number): Move | null {
+  const primary = primaryClassOf(a); // eco (pax) or cargo (freighter)
+  const cap = overshootCapOf(a); // max per-route-per-day overshoot for the primary class
   let v = ceilTo(a.cursor, TIME_GRANULARITY); // virtual position, on the 900 s grid
   while (v < vEnd) {
     const real = v % WEEK_SECONDS; // concrete take-off time in [0, WEEK)
     const day = Math.floor(real / DAY_SECONDS);
 
     let best: Move | null = null;
-    for (const line of lines) {
-      if (!canFly(a, line)) continue;
+    // candLines is PRE-FILTERED to the routes this aircraft can fly (canFly) AND that are
+    // still active (not sold) — so the hot loop does no per-flight canFly work.
+    for (const line of candLines) {
       const duration = roundTripDuration(a, line);
       if (v + duration > vEnd) continue; // must finish inside this aircraft's one week
       const { value, fillWithin, fillOver } = roundTripValue(a, line, day);
-      if (value <= 0) continue; // unprofitable on that day -> skip (caps oversupply)
-      const density = value / duration;
+      // OBJECTIVE = ECO COVERAGE, filled to the BRIM (player: "la idea es full llénalo").
+      // Serve a route while it still has POSITIVE eco (cargo for freighters) demand left this
+      // day; the flight that crosses zero is allowed to overshoot the demand by coarse seats.
+      const primaryWithin = fillWithin[primary];
+      if (primaryWithin <= 0) continue; // route's primary demand for this day is exhausted -> use another route
+      // HARD RULE: never drive a route below −CAP for a single day. The crossing flight adds
+      // fillOver[primary] empty seats on top of whatever this day already oversupplies; skip it
+      // if that exceeds the cap (aircraft too big for this route's residual — leave it for a route
+      // where it fits). With eco demand the cap is ECO_OVERSHOOT_CAP (1500); cargo uses its own.
+      if (line.over[day][primary] + fillOver[primary] > cap) continue;
+      // Score = primary seats filled per second -> fill the biggest eco gaps fastest,
+      // so the smallest, overshoot-prone slivers are served last (minimal oversupply).
+      const density = primaryWithin / duration;
       if (!best || density > best.density) {
         best = { line, day, takeOffTime: real, vStart: v, duration, value, density, fillWithin, fillOver };
       }
@@ -143,56 +167,134 @@ function commitTrip(a: Aircraft, m: Move): void {
   });
 }
 
-/**
- * Greedy allocation, DAY-AWARE and CONCENTRATED into a "pyramid".
- *
- * We fill ONE aircraft to its maximum (its whole week, day by day, with the best
- * profitable flights) BEFORE starting the next one. So flying piles onto as few
- * aircraft as possible: the most efficient run at ~100%, the next a bit less, and
- * the SURPLUS aircraft are left completely UNUSED — free to move to another hub or
- * reconfigure for cargo. (The player explicitly does NOT want many aircraft each at
- * 50%; they want a 100 / 99 / 99 / … / 0 pyramid.)
- *
- * Aircraft are ordered by the best profit density they can reach at full demand, so
- * the most capable fill first (and become the most-used), and the routes only a
- * small aircraft can serve are left for it. Oversupply is fine as long as the seats
- * that DO sell pay for the flight — that is exactly the profit test in roundTripValue.
- */
-export function greedyAllocate(aircraft: Aircraft[], hubLines: Line[]): void {
-  const fleet = aircraft.filter((a) => !(SKIP_RENTALS && a.isRental));
-
+/** ONE allocation pass: fill each of `planes` to the brim (scarcity-aware pyramid order)
+ *  against the CURRENT hub demand state. `candByAircraft` maps each plane to its flyable,
+ *  still-active routes (PRE-FILTERED — the hot loop does no per-flight canFly work). Resets
+ *  each plane's schedule first. */
+function fillOnce(planes: Aircraft[], candByAircraft: Map<number, Line[]>): void {
   // Each aircraft gets its own staggered virtual week [phase, phase+WEEK) so the
   // fleet doesn't all depart Monday 00:00 (realistic, spread-out take-offs).
   const vEndOf = new Map<number, number>();
-  for (const a of fleet) {
+  for (const a of planes) {
     a.cursor = phaseOffset(a.id);
+    a.assigned = [];
     vEndOf.set(a.id, a.cursor + WEEK_SECONDS);
   }
 
-  // SCARCITY-AWARE MATCHING + pyramid order. Before an aircraft "burns" a route we
-  // must respect that the route may be the ONLY thing another aircraft can fly. So
-  // we process the MOST CONSTRAINED aircraft first (fewest flyable routes): it
-  // claims its scarce routes before a flexible aircraft consumes them, so no
-  // aircraft that COULD fly ends up stranded — maximum fleet usability. Among
-  // equally-constrained aircraft the most efficient (best density) goes first, so
-  // usage still concentrates into a pyramid (most-used → least-used → unused).
-  const options = new Map<number, number>(); // aircraft id -> how many routes it can fly
-  for (const a of fleet) options.set(a.id, hubLines.reduce((n, l) => n + (canFly(a, l) ? 1 : 0), 0));
-
-  const order = fleet
-    .map((a) => ({ a, opt: options.get(a.id)!, density: bestMoveFor(a, hubLines, vEndOf.get(a.id)!)?.density ?? -Infinity }))
-    // most-constrained first, then most-efficient; id breaks ties so the SAME
-    // aircraft always fills first and the SAME surplus one stays idle (stable wear).
+  // SCARCITY-AWARE pyramid order. Process the MOST CONSTRAINED aircraft first (fewest
+  // flyable active routes): it claims its scarce routes before a flexible aircraft consumes
+  // them, so nothing that COULD fly ends up stranded. Among equally-constrained aircraft the
+  // best eco-filler goes first → usage concentrates into a pyramid; id breaks ties (stable
+  // wear: the SAME aircraft always fills first, the SAME surplus one stays idle).
+  const order = planes
+    .map((a) => ({ a, opt: candByAircraft.get(a.id)!.length, density: bestMoveFor(a, candByAircraft.get(a.id)!, vEndOf.get(a.id)!)?.density ?? -Infinity }))
     .sort((x, y) => x.opt - y.opt || y.density - x.density || x.a.id - y.a.id)
     .map((x) => x.a);
 
-  // Fill each aircraft to the brim before the next: keep taking its best profitable
-  // flight until none is left (demand exhausted for it, or its week is full).
+  // Fill each aircraft to the brim before the next: keep taking its best eco-filling
+  // flight until none is left (eco demand exhausted for it, or its week is full).
   for (const a of order) {
     const vEnd = vEndOf.get(a.id)!;
-    for (let move = bestMoveFor(a, hubLines, vEnd); move; move = bestMoveFor(a, hubLines, vEnd)) {
-      commitTrip(a, move);
+    const cand = candByAircraft.get(a.id)!;
+    for (let move = bestMoveFor(a, cand, vEnd); move; move = bestMoveFor(a, cand, vEnd)) commitTrip(a, move);
+  }
+}
+
+/** Reset a hub's per-day demand and oversupply to the daily baseline (for a refill). */
+function resetHubDemand(hubLines: Line[]): void {
+  for (const l of hubLines) {
+    for (let d = 0; d < DAYS_PER_WEEK; d++) {
+      const rem = l.remaining[d];
+      const ov = l.over[d];
+      rem.eco = l.dailyDemand.eco;
+      rem.bus = l.dailyDemand.bus;
+      rem.first = l.dailyDemand.first;
+      rem.cargo = l.dailyDemand.cargo;
+      ov.eco = 0;
+      ov.bus = 0;
+      ov.first = 0;
+      ov.cargo = 0;
     }
+  }
+}
+
+/**
+ * Greedy allocation toward ECO COVERAGE, concentrated into a pyramid, with two player
+ * rules layered on top (enforced together in ONE iterative loop):
+ *   · UTIL FLOOR (`utilFloor`) — no flying aircraft below the floor: GROUND the worst
+ *     sub-floor ones and refill, so their eco is re-absorbed by the survivors ("fill it
+ *     or empty it"; no half-used tail).
+ *   · SELL DROP (`sellThreshold`) — a route whose eco ends below the threshold isn't worth
+ *     serving: STOP using it (free its aircraft), so it surfaces as a SELL candidate and the
+ *     kept routes climb toward full coverage.
+ * Grounding lowers route coverage and dropping a route lowers aircraft util, so the two
+ * interact — we re-check BOTH every round until neither is violated (or nothing is left).
+ * The loop only ever REMOVES (grounds / sells), so it always terminates; at termination every
+ * flying aircraft is ≥ floor and every SERVED route is ≥ threshold.
+ * With utilFloor<=0 it's a single plain pass (used by the buy simulator on leftover demand).
+ */
+export function greedyAllocate(aircraft: Aircraft[], hubLines: Line[], utilFloor = 0, sellThreshold = 0): void {
+  const fleet = aircraft.filter((a) => !(SKIP_RENTALS && a.isRental));
+  // Static canFly cache: each aircraft -> the hub routes it can physically fly.
+  const flyable = new Map<number, Line[]>();
+  for (const a of fleet) flyable.set(a.id, hubLines.filter((l) => canFly(a, l)));
+
+  if (utilFloor <= 0) {
+    fillOnce(fleet, flyable); // single pass against current demand (buy-simulator path)
+    return;
+  }
+
+  const usedSecs = (a: Aircraft) => a.assigned.reduce((s, t) => s + t.duration, 0);
+  // A plane is "long-haul-maxed" when it can't fit ANOTHER round trip of its LONGEST flown
+  // route in the week — e.g. 4× a 33.75h route = 80% util but a 5th won't fit. Such a plane is
+  // as full as its routes allow (the 33h gap can't take another long leg); grounding it would
+  // only DROP that long-haul eco. So it is NOT groundable even below the util floor — it should
+  // instead be combined with other routes (which the greedy already backfills when their eco is
+  // available). Only planes that still have room for another of their longest leg are genuinely
+  // underfilled and get grounded.
+  const longHaulMaxed = (a: Aircraft) => {
+    const used = usedSecs(a);
+    const longest = a.assigned.reduce((m, t) => Math.max(m, t.duration), 0);
+    return WEEK_SECONDS - used < longest;
+  };
+  const active = new Set<number>(hubLines.map((l) => l.id)); // route ids still worth serving
+  const candFor = (planes: Aircraft[]) => {
+    const m = new Map<number, Line[]>();
+    for (const a of planes) m.set(a.id, flyable.get(a.id)!.filter((l) => active.has(l.id)));
+    return m;
+  };
+  let eligible = [...fleet];
+  for (let guard = 0; guard < 4000; guard++) {
+    resetHubDemand(hubLines);
+    fillOnce(eligible, candFor(eligible));
+
+    // Sub-floor aircraft worth grounding: below the util floor AND still have room for another
+    // of their longest leg (genuinely underfilled). Long-haul-maxed planes are KEPT (a long
+    // route like ADD/MEX caps a dedicated plane at ~80% — that's full, not waste).
+    const badAc = eligible
+      .filter((a) => a.assigned.length > 0 && usedSecs(a) / WEEK_SECONDS < utilFloor && !longHaulMaxed(a))
+      .sort((x, y) => usedSecs(x) - usedSecs(y));
+    // Sell routes: active routes whose eco ended below the sell threshold, worst first.
+    const badRt: { l: Line; cov: number }[] = [];
+    if (sellThreshold > 0) {
+      for (const l of hubLines) {
+        if (!active.has(l.id) || l.weeklyDemand.eco <= 0) continue;
+        let served = 0;
+        for (let d = 0; d < DAYS_PER_WEEK; d++) served += l.dailyDemand.eco - l.remaining[d].eco;
+        const cov = served / l.weeklyDemand.eco;
+        if (cov < sellThreshold) badRt.push({ l, cov });
+      }
+      badRt.sort((x, y) => x.cov - y.cov);
+    }
+    if (badAc.length === 0 && badRt.length === 0) break;
+
+    // Sell the worst HALF of sub-threshold routes (frees capacity) and ground the worst
+    // QUARTER of sub-floor aircraft this round; re-check next round so we don't over-prune.
+    for (const { l } of badRt.slice(0, Math.max(1, Math.ceil(badRt.length / 2)))) active.delete(l.id);
+    const ground = new Set(badAc.slice(0, Math.max(1, Math.ceil(badAc.length / 4))).map((a) => a.id));
+    for (const a of eligible) if (ground.has(a.id)) a.assigned = [];
+    eligible = eligible.filter((a) => !ground.has(a.id));
+    if (eligible.length === 0) break;
   }
 }
 
@@ -202,8 +304,11 @@ export interface OptimizationResult {
   totalFlights: number;
 }
 
-/** Run the full algorithm and return the per-aircraft plan (without sending it). */
-export function optimize(aircraft: Aircraft[], lines: Map<number, Line>): OptimizationResult {
+/** Run the full algorithm and return the per-aircraft plan (without sending it).
+ *  `opts.utilFloor`/`opts.sellThreshold` override the config defaults (to compare variants). */
+export function optimize(aircraft: Aircraft[], lines: Map<number, Line>, opts?: { utilFloor?: number; sellThreshold?: number }): OptimizationResult {
+  const utilFloor = opts?.utilFloor ?? UTIL_FLOOR;
+  const sellThreshold = opts?.sellThreshold ?? SELL_THRESHOLD;
   // Hubs are independent (no aircraft flies another hub's routes), so optimize
   // each hub separately: same result, much faster.
   const hubIdx = linesByHub(lines);
@@ -214,7 +319,10 @@ export function optimize(aircraft: Aircraft[], lines: Map<number, Line>): Optimi
   }
   for (const [hubId, planes] of byHub) {
     const hubLines = hubIdx.get(hubId) ?? [];
-    greedyAllocate(planes, hubLines); // serve each day's profitable demand, day by day
+    // ALL aircraft are (re)optimised together: passenger aircraft fill ECO, freighters fill
+    // CARGO (see primaryClassOf), both under the util floor + sell-drop. (The player asked to
+    // NOT leave freighters untouched — they get planned for their cargo demand too.)
+    greedyAllocate(planes, hubLines, utilFloor, sellThreshold);
   }
 
   const plans: AircraftPlan[] = [];

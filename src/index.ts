@@ -7,6 +7,7 @@ import { buildHubAdvice, computeServedByLine, type BuyableRoute, type HubAdvice 
 import {
   computeMetrics,
   printComparison,
+  printDailyOvershoot,
   printFleetAnalysis,
   printHubSummary,
   printOversupply,
@@ -139,6 +140,7 @@ async function main() {
   printComparison(before, after);
   printHubSummary(aircraft, lines);
   printOversupply(after, lines);
+  printDailyOvershoot(afterFlights, fleet, lines);
   printPlanSample(plans, fleet, lines);
 
   // ── Save plan (update-ready format, but NOT sent) ────────────────────────────────

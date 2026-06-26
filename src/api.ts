@@ -197,3 +197,24 @@ export async function buyRoute(hubLoadId: number, destCode: string): Promise<str
   }
   return "ok";
 }
+
+/**
+ * SELL (close) a route by its line id. GET the sell form for its CSRF token, then POST to
+ * confirm. IRREVERSIBLE (re-buying costs money + audit). Throws "NO_TOKEN" when the page has
+ * no sell form (wrong/stale line id, or the route is already gone) — so a bad id never POSTs.
+ */
+export async function sellLine(lineId: number): Promise<string> {
+  const url = `${BASE_URL}/network/showline/${lineId}/sell`;
+  const ref = `${BASE_URL}/network/showline/${lineId}`;
+  const getRes = await fetch(url, { headers: { ...listHeaders(), referer: ref } });
+  if (!getRes.ok) throw new Error(`GET sell -> ${getRes.status}`);
+  const token = /name="form\[_token\]"\s+value="([^"]+)"/.exec(await getRes.text())?.[1];
+  if (!token) throw new Error("NO_TOKEN");
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { ...listHeaders(), "content-type": "application/x-www-form-urlencoded; charset=UTF-8", origin: BASE_URL, referer: ref },
+    body: `form%5B_token%5D=${encodeURIComponent(token)}`,
+  });
+  if (!res.ok) throw new Error(`POST sell -> ${res.status} ${res.statusText}`);
+  return (await res.text()).replace(/\s+/g, " ").slice(0, 200);
+}

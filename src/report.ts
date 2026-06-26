@@ -1,4 +1,4 @@
-import { DAY_SECONDS, DAYS_PER_WEEK, DEMAND_DAYS, LEGS_PER_ROUNDTRIP, WEEK_SECONDS } from "./config.ts";
+import { CARGO_OVERSHOOT_CAP, DAY_SECONDS, DAYS_PER_WEEK, DEMAND_DAYS, ECO_OVERSHOOT_CAP, LEGS_PER_ROUNDTRIP, WEEK_SECONDS } from "./config.ts";
 import { capacityOf, roundTripDuration } from "./model.ts";
 import type { Aircraft, AircraftPlan, CabinClass, Line } from "./types.ts";
 
@@ -298,6 +298,97 @@ export function printOversupply(after: Metrics, lines: Map<number, Line>, n = 12
   const freeTotal = free.reduce((s, r) => s + r.ecoFree, 0);
   console.log(`  ${hr("─").slice(2)}`);
   console.log(`  Uncovered ECO demand: ${fmt(freeTotal)} seats/week across ${free.length} routes (room for more aircraft).`);
+}
+
+const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+/**
+ * Per-route-per-DAY oversupply for ONE class, recomputed straight from the proposed
+ * flights: Σ (this class's capacity × both legs) departing that day, minus that day's
+ * demand. Only positive (oversupplied) route-days are returned, worst first. This is the
+ * game's negative "remaining demand" line for that class.
+ */
+function dailyOversupplyRows(
+  flightsByAircraft: { aircraftId: number; flights: FlightRef[] }[],
+  fleet: FleetIndex,
+  lines: Map<number, Line>,
+  cls: CabinClass,
+): { name: string; day: number; over: number }[] {
+  const offered = new Map<number, number[]>();
+  for (const { aircraftId, flights } of flightsByAircraft) {
+    const a = fleet.get(aircraftId);
+    if (!a) continue;
+    const perTrip = capacityOf(a)[cls] * LEGS_PER_ROUNDTRIP; // both legs count against the day's demand
+    if (perTrip <= 0) continue;
+    for (const f of flights) {
+      if (!lines.has(f.lineId)) continue;
+      const day = Math.floor((f.takeOffTime % WEEK_SECONDS) / DAY_SECONDS);
+      let days = offered.get(f.lineId);
+      if (!days) offered.set(f.lineId, (days = new Array(DAYS_PER_WEEK).fill(0)));
+      days[day] += perTrip;
+    }
+  }
+  const rows: { name: string; day: number; over: number }[] = [];
+  for (const [lineId, days] of offered) {
+    const line = lines.get(lineId)!;
+    for (let d = 0; d < DAYS_PER_WEEK; d++) {
+      const over = days[d] - line.dailyDemand[cls];
+      if (over > 0) rows.push({ name: line.name, day: d, over });
+    }
+  }
+  rows.sort((a, b) => b.over - a.over);
+  return rows;
+}
+
+/**
+ * Validate the overshoot caps against the proposed plan (independent of the optimizer's
+ * internal state). ECO is the player's ONE HARD RULE — no route may be driven below
+ * −ecoCap eco on any single day; with the cap enforced in `bestMoveFor` this should always
+ * be 0. CARGO is reported too (the optimizer caps a FREIGHTER's cargo overshoot at cargoCap),
+ * but it's informational: passenger BELLY cargo rides along ungated, so it can legitimately
+ * push a route's cargo "remaining" past the freighter guard at no extra cost (the plane flies
+ * for eco regardless — the empty belly is free), so cargo is shown, not asserted.
+ */
+export function printDailyOvershoot(
+  flightsByAircraft: { aircraftId: number; flights: FlightRef[] }[],
+  fleet: FleetIndex,
+  lines: Map<number, Line>,
+  ecoCap = ECO_OVERSHOOT_CAP,
+  cargoCap = CARGO_OVERSHOOT_CAP,
+  n = 12,
+): void {
+  const eco = dailyOversupplyRows(flightsByAircraft, fleet, lines, "eco");
+  const ecoViol = eco.filter((r) => r.over > ecoCap);
+
+  console.log(`\n${hr("═")}\n  ECO OVERSHOOT CHECK — hard rule: no route below −${fmt(ecoCap)} eco on any day\n${hr("═")}`);
+  if (eco.length === 0) {
+    console.log("  (no route is eco-oversupplied on any day — every eco flight serves real demand)");
+  } else {
+    console.log(`  Worst route-days (game shows this as the red negative "remaining"):`);
+    for (const r of eco.slice(0, n)) {
+      console.log(`    ${r.name.padEnd(13)} ${DAY_NAMES[r.day]}  −${fmt(r.over).padStart(6)} eco${r.over > ecoCap ? "   ✗ EXCEEDS CAP" : ""}`);
+    }
+  }
+  console.log(`  ${hr("─").slice(2)}`);
+  console.log(
+    ecoViol.length === 0
+      ? `  ✓ 0 route-days exceed the −${fmt(ecoCap)} eco cap.`
+      : `  ✗ ${ecoViol.length} route-day(s) exceed the −${fmt(ecoCap)} eco cap (worst −${fmt(ecoViol[0].over)}).`,
+  );
+
+  // Cargo (informational — freighter guard; pax belly rides along ungated).
+  const cargo = dailyOversupplyRows(flightsByAircraft, fleet, lines, "cargo");
+  const cargoViol = cargo.filter((r) => r.over > cargoCap);
+  console.log(`  ${hr("─").slice(2)}`);
+  if (cargo.length === 0) {
+    console.log(`  Cargo: no route oversupplied (freighter guard −${fmt(cargoCap)} t).`);
+  } else {
+    const worst = cargo[0];
+    console.log(
+      `  Cargo (info, pax belly ungated): worst ${worst.name} ${DAY_NAMES[worst.day]} −${fmt(worst.over)} t · ` +
+        `${cargoViol.length} route-day(s) above the −${fmt(cargoCap)} t freighter guard.`,
+    );
+  }
 }
 
 /** Per-aircraft detail of the proposed plan (first N). */
