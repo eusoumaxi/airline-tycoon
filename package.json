@@ -1,19 +1,47 @@
 {
-  "name": "airline-tycoon-slots",
+  "name": "airline-tycoon",
   "version": "1.0.0",
-  "description": "Automatic slot optimizer for Airlines Manager (tycoon.airlines-manager.com)",
+  "description": "Unofficial slot optimizer for Airlines Manager.",
+  "keywords": [
+    "airlines-manager",
+    "optimizer",
+    "bun",
+    "typescript"
+  ],
+  "homepage": "https://github.com/eusoumaxi/airline-tycoon#readme",
+  "bugs": {
+    "url": "https://github.com/eusoumaxi/airline-tycoon/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eusoumaxi/airline-tycoon.git"
+  },
+  "license": "MIT",
+  "author": "David Lara",
   "type": "module",
   "scripts": {
-    "start": "bun run src/index.ts",
-    "optimize": "bun run src/index.ts",
-    "fetch": "bun run src/index.ts --fetch-only",
-    "offline": "bun run src/index.ts --offline",
-    "apply": "bun run src/apply.ts",
-    "apply:live": "bun run src/apply.ts --apply",
-    "buyroute": "bun run src/buyroute.ts"
+    "apply": "bun run src/cli/apply.ts",
+    "apply:live": "bun run src/cli/apply.ts --apply",
+    "buyroute": "bun run src/cli/buy-route.ts",
+    "check": "ultracite check",
+    "fetch": "bun run src/cli/optimize.ts --fetch-only",
+    "fix": "ultracite fix",
+    "move-hub": "bun run src/cli/move-hub.ts",
+    "move-surplus": "bun run src/cli/move-surplus.ts",
+    "offline": "bun run src/cli/optimize.ts --offline",
+    "optimize": "bun run src/cli/optimize.ts",
+    "rebalance": "bun run src/cli/rebalance.ts",
+    "rebalance:apply": "bun run src/cli/rebalance-apply.ts",
+    "sell-routes": "bun run src/cli/sell-routes.ts",
+    "start": "bun run src/cli/optimize.ts"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.9",
     "@types/bun": "latest",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "ultracite": "7.10.7"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
   }
 }

@@ -1,18 +1,35 @@
-import { BUY_CATALOG, DAY_SECONDS, DAYS_PER_WEEK, ECO_TARGET, LEGS_PER_ROUNDTRIP, SELL_THRESHOLD, WEEK_SECONDS } from "./config.ts";
+/**
+ * @fileoverview Per-hub HTML reports (`data/report_<CODE>.html`).
+ */
+import {
+  BUY_CATALOG,
+  DAY_SECONDS,
+  DAYS_PER_WEEK,
+  ECO_TARGET,
+  LEGS_PER_ROUNDTRIP,
+  SELL_THRESHOLD,
+  WEEK_SECONDS,
+} from "./config.ts";
+import { esc, fmt, pct } from "./format.ts";
 import { capacityOf, roundTripDuration } from "./model.ts";
-import type { BuyOrder, HubAdvice } from "./recommend.ts";
-import type { Aircraft, CabinClass, Line, ProposedFlight } from "./types.ts";
+import {
+  type Aircraft,
+  type BuyOrder,
+  CABIN_CLASSES,
+  type CabinClass,
+  type HubAdvice,
+  type Line,
+  type ProposedFlight,
+  WEEKDAYS,
+} from "./types.ts";
 
-const CLASSES: CabinClass[] = ["eco", "bus", "first", "cargo"];
-const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
-const fmt = (n: number) => Math.round(n).toLocaleString("en-US");
-const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
+const CLASSES = CABIN_CLASSES;
+const DAYS = WEEKDAYS;
 
 /** Convert week-seconds into "Mon 14:30". */
 function dayTime(t: number): string {
-  const d = Math.floor(t / 86400) % 7;
-  const h = Math.floor((t % 86400) / 3600);
+  const d = Math.floor(t / 86_400) % 7;
+  const h = Math.floor((t % 86_400) / 3600);
   const m = Math.floor((t % 3600) / 60);
   return `${DAYS[d]} ${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
@@ -22,18 +39,18 @@ function utilOf(durations: number[]): number {
 }
 
 /**
- * Build a self-contained HTML for ONE hub showing how the planning would look
- * after the readjustment: summary, a collapsible game-style weekly grid per
- * aircraft (Current vs Proposed) and a routes table (offer vs demand).
+ * Self-contained HTML for one hub: current vs proposed week grid, routes, buy advice.
  */
 export function buildHubHtml(
   hubCode: string,
   hubAircraft: Aircraft[],
   lines: Map<number, Line>,
   plansById: Map<number, ProposedFlight[]>,
-  advice: HubAdvice,
+  advice: HubAdvice
 ): string {
-  const hubLines = [...lines.values()].filter((l) => hubAircraft[0] && l.hubId === hubAircraft[0].hubId);
+  const hubLines = [...lines.values()].filter(
+    (l) => hubAircraft[0] && l.hubId === hubAircraft[0].hubId
+  );
 
   // ── Offer per route (from the proposed plan), bucketed by DEPARTURE DAY ───────
   // The game meters demand per day, so weekly totals can look fine while a single
@@ -45,17 +62,26 @@ export function buildHubHtml(
     const plan = plansById.get(a.id) ?? [];
     const cap = capacityOf(a);
     for (const f of plan) {
-      const o = offered.get(f.lineId) ?? { eco: 0, bus: 0, first: 0, cargo: 0 };
+      const o = offered.get(f.lineId) ?? { bus: 0, cargo: 0, eco: 0, first: 0 };
       // A round trip offers BOTH legs against the daily demand (matches the game).
-      for (const c of CLASSES) o[c] += cap[c] * LEGS_PER_ROUNDTRIP;
+      for (const c of CLASSES) {
+        o[c] += cap[c] * LEGS_PER_ROUNDTRIP;
+      }
       offered.set(f.lineId, o);
       let days = offeredByDay.get(f.lineId);
       if (!days) {
-        days = Array.from({ length: DAYS_PER_WEEK }, () => ({ eco: 0, bus: 0, first: 0, cargo: 0 }));
+        days = Array.from({ length: DAYS_PER_WEEK }, () => ({
+          bus: 0,
+          cargo: 0,
+          eco: 0,
+          first: 0,
+        }));
         offeredByDay.set(f.lineId, days);
       }
       const day = Math.floor((f.takeOffTime % WEEK_SECONDS) / DAY_SECONDS);
-      for (const c of CLASSES) days[day][c] += cap[c] * LEGS_PER_ROUNDTRIP;
+      for (const c of CLASSES) {
+        days[day][c] += cap[c] * LEGS_PER_ROUNDTRIP;
+      }
       flightsPerLine.set(f.lineId, (flightsPerLine.get(f.lineId) ?? 0) + 1);
     }
   }
@@ -64,11 +90,21 @@ export function buildHubHtml(
   let flying = 0;
   const rows = hubAircraft
     .map((a) => {
-      const before = utilOf(a.planningList.map((p) => (lines.get(p.lineId) ? roundTripDuration(a, lines.get(p.lineId)!) : 0)));
+      const before = utilOf(
+        a.planningList.map((p) =>
+          lines.get(p.lineId) ? roundTripDuration(a, lines.get(p.lineId)!) : 0
+        )
+      );
       const plan = plansById.get(a.id) ?? [];
-      const after = utilOf(plan.map((f) => (lines.get(f.lineId) ? roundTripDuration(a, lines.get(f.lineId)!) : 0)));
-      if (plan.length) flying++;
-      return { a, before, after, plan };
+      const after = utilOf(
+        plan.map((f) =>
+          lines.get(f.lineId) ? roundTripDuration(a, lines.get(f.lineId)!) : 0
+        )
+      );
+      if (plan.length) {
+        flying++;
+      }
+      return { a, after, before, plan };
     })
     .sort((x, y) => y.after - x.after);
 
@@ -76,7 +112,9 @@ export function buildHubHtml(
 
   // ── Route legend (game color) ────────────────────────────────────────────────
   const lineColor = new Map<number, string>();
-  for (const l of hubLines) lineColor.set(l.id, l.color || "#999");
+  for (const l of hubLines) {
+    lineColor.set(l.id, l.color || "#999");
+  }
 
   // ── Grid header (hour ticks every 3h + hour gridlines) ───────────────────────
   const hourTicks = Array.from({ length: 9 }, (_, i) => i * 3)
@@ -90,34 +128,63 @@ export function buildHubHtml(
    * Reusable for the CURRENT or the PROPOSED plan. Flights that cross the week
    * boundary are split (the tail continues on Monday).
    */
-  const weekGrid = (a: Aircraft, flights: { takeOffTime: number; lineId: number }[], label: string): string => {
-    type Iv = { s: number; e: number; col: string; name: string; title: string; head: boolean };
+  const weekGrid = (
+    a: Aircraft,
+    planFlights: { takeOffTime: number; lineId: number }[],
+    label: string
+  ): string => {
+    interface Iv {
+      col: string;
+      e: number;
+      head: boolean;
+      name: string;
+      s: number;
+      title: string;
+    }
     const ivs: Iv[] = [];
-    for (const f of flights) {
+    for (const f of planFlights) {
       const line = lines.get(f.lineId);
-      if (!line) continue;
+      if (!line) {
+        continue;
+      }
       const dur = roundTripDuration(a, line);
       const s = f.takeOffTime;
       const e = s + dur;
       const col = lineColor.get(f.lineId) ?? "#999";
       const title = `${esc(line.name)} · dep ${dayTime(s)} → arr ${dayTime((s + dur) % WEEK_SECONDS)} · ${(dur / 3600).toFixed(1)}h`;
       if (e <= WEEK_SECONDS) {
-        ivs.push({ s, e, col, name: esc(line.name), title, head: true });
+        ivs.push({ col, e, head: true, name: esc(line.name), s, title });
       } else {
-        ivs.push({ s, e: WEEK_SECONDS, col, name: esc(line.name), title, head: true });
-        ivs.push({ s: 0, e: e - WEEK_SECONDS, col, name: "", title, head: false }); // tail at week start
+        ivs.push({
+          col,
+          e: WEEK_SECONDS,
+          head: true,
+          name: esc(line.name),
+          s,
+          title,
+        });
+        ivs.push({
+          col,
+          e: e - WEEK_SECONDS,
+          head: false,
+          name: "",
+          s: 0,
+          title,
+        }); // tail at week start
       }
     }
     const dayRows = DAYS.map((dname, d) => {
-      const dStart = d * 86400;
-      const dEnd = dStart + 86400;
+      const dStart = d * 86_400;
+      const dEnd = dStart + 86_400;
       const segs = ivs
         .map((iv) => {
           const os = Math.max(iv.s, dStart);
           const oe = Math.min(iv.e, dEnd);
-          if (os >= oe) return "";
-          const left = ((os - dStart) / 86400) * 100;
-          const w = ((oe - os) / 86400) * 100;
+          if (os >= oe) {
+            return "";
+          }
+          const left = ((os - dStart) / 86_400) * 100;
+          const w = ((oe - os) / 86_400) * 100;
           const lbl = iv.head && iv.s >= dStart && iv.s < dEnd ? iv.name : ""; // label on the departure day
           return `<div class="seg" style="left:${left}%;width:${w}%;background:${iv.col}" title="${iv.title}"><span>${lbl}</span></div>`;
         })
@@ -131,10 +198,16 @@ export function buildHubHtml(
     .filter((r) => r.plan.length > 0) // only aircraft that actually fly; idle ones get their own section
     .map(({ a, before, after, plan }) => {
       const routes = [...new Set(plan.map((f) => f.lineId))]
-        .map((id) => `${esc(lines.get(id)?.name ?? String(id))}×${plan.filter((f) => f.lineId === id).length}`)
+        .map(
+          (id) =>
+            `${esc(lines.get(id)?.name ?? String(id))}×${plan.filter((f) => f.lineId === id).length}`
+        )
         .join(", ");
       const cls = after >= 0.99 ? "hi" : after >= 0.9 ? "mid" : "lo";
-      const cur = a.planningList.map((p) => ({ takeOffTime: p.takeOffTime, lineId: p.lineId }));
+      const cur = a.planningList.map((p) => ({
+        lineId: p.lineId,
+        takeOffTime: p.takeOffTime,
+      }));
       return `<details class="acd">
         <summary>
           <span class="nm"><b>${esc(a.name)}</b> <i>${esc(a.aircraftListName)}</i></span>
@@ -154,15 +227,27 @@ export function buildHubHtml(
 
   // ── Coverage now → after buying the recommended fleet ─────────────────────────
   const covCls = (c: number) => (c < 0.5 ? "bad" : c < 0.9 ? "mid" : "ok");
-  const covNow = advice.demand.eco ? advice.servedNow.eco / advice.demand.eco : 1;
+  const covNow = advice.demand.eco
+    ? advice.servedNow.eco / advice.demand.eco
+    : 1;
   const ecoAfter = Math.max(0, advice.demand.eco - advice.residual.eco);
   const covAfter = advice.demand.eco ? ecoAfter / advice.demand.eco : 1;
-  const cargoNow = advice.demand.cargo ? advice.servedNow.cargo / advice.demand.cargo : 1;
-  const cargoAfter = advice.demand.cargo ? Math.max(0, advice.demand.cargo - advice.residual.cargo) / advice.demand.cargo : 1;
+  const cargoNow = advice.demand.cargo
+    ? advice.servedNow.cargo / advice.demand.cargo
+    : 1;
+  const cargoAfter = advice.demand.cargo
+    ? Math.max(0, advice.demand.cargo - advice.residual.cargo) /
+      advice.demand.cargo
+    : 1;
   const investment = advice.buyOrders.reduce((s, o) => s + o.totalPrice, 0);
   const toBuy = advice.buyOrders.reduce((s, o) => s + o.count, 0);
-  const paxNow = advice.demand.eco + advice.demand.bus + advice.demand.first - (advice.servedNow.eco + advice.servedNow.bus + advice.servedNow.first);
-  const paxAfter = advice.residual.eco + advice.residual.bus + advice.residual.first;
+  const paxNow =
+    advice.demand.eco +
+    advice.demand.bus +
+    advice.demand.first -
+    (advice.servedNow.eco + advice.servedNow.bus + advice.servedNow.first);
+  const paxAfter =
+    advice.residual.eco + advice.residual.bus + advice.residual.first;
 
   // ── ECO FILL — THE OBJECTIVE: how much of each route's eco demand the plan serves ─
   // (Business/First/Cargo just ride along; the optimizer only chases eco, target ECO_TARGET.)
@@ -170,27 +255,46 @@ export function buildHubHtml(
   for (const l of hubLines) {
     const days = offeredByDay.get(l.id);
     let s = 0;
-    for (let d = 0; d < DAYS_PER_WEEK; d++) s += Math.min(days?.[d].eco ?? 0, l.dailyDemand.eco);
+    for (let d = 0; d < DAYS_PER_WEEK; d++) {
+      s += Math.min(days?.[d].eco ?? 0, l.dailyDemand.eco);
+    }
     ecoServedByLine.set(l.id, s);
   }
   const ecoRoutes = hubLines.filter((l) => l.weeklyDemand.eco > 0);
   const hubEcoDemand = ecoRoutes.reduce((s, l) => s + l.weeklyDemand.eco, 0);
-  const hubEcoServed = ecoRoutes.reduce((s, l) => s + (ecoServedByLine.get(l.id) ?? 0), 0);
+  const hubEcoServed = ecoRoutes.reduce(
+    (s, l) => s + (ecoServedByLine.get(l.id) ?? 0),
+    0
+  );
   const hubEcoFill = hubEcoDemand ? hubEcoServed / hubEcoDemand : 1;
-  const routesAtTarget = ecoRoutes.filter((l) => (ecoServedByLine.get(l.id) ?? 0) / l.weeklyDemand.eco >= ECO_TARGET).length;
+  const routesAtTarget = ecoRoutes.filter(
+    (l) => (ecoServedByLine.get(l.id) ?? 0) / l.weeklyDemand.eco >= ECO_TARGET
+  ).length;
   const ecoTargetPct = `${Math.round(ECO_TARGET * 100)}%`;
-  const ecoCls = (c: number) => (c >= ECO_TARGET ? "ok" : c >= 0.8 ? "mid" : "bad");
-  const underservedByLine = new Map(advice.underserved.map((u) => [u.line.id, u]));
+  const ecoCls = (c: number) =>
+    c >= ECO_TARGET ? "ok" : c >= 0.8 ? "mid" : "bad";
+  const underservedByLine = new Map(
+    advice.underserved.map((u) => [u.line.id, u])
+  );
   // Eco fill per route, WORST-covered first (the objective). Routes stuck below SELL_THRESHOLD
   // are the SELL candidates — the optimizer stopped using them (freed their aircraft).
   const ecoRouteRows = ecoRoutes
-    .map((l) => ({ l, served: ecoServedByLine.get(l.id) ?? 0, cov: (ecoServedByLine.get(l.id) ?? 0) / l.weeklyDemand.eco }))
+    .map((l) => ({
+      cov: (ecoServedByLine.get(l.id) ?? 0) / l.weeklyDemand.eco,
+      l,
+      served: ecoServedByLine.get(l.id) ?? 0,
+    }))
     .sort((a, b) => a.cov - b.cov);
   const sellPct = `${Math.round(SELL_THRESHOLD * 100)}%`;
   const sellRoutes = ecoRouteRows.filter((r) => r.cov < SELL_THRESHOLD);
 
   // ── BUY PLAN — what to buy + what each aircraft actually carries ───────────────
-  const seatChips = (c: { eco: number; bus: number; first: number; cargo: number }) =>
+  const seatChips = (c: {
+    eco: number;
+    bus: number;
+    first: number;
+    cargo: number;
+  }) =>
     `<div class="seats"><span class="seat eco">${fmt(c.eco)} eco</span><span class="seat bus">${fmt(c.bus)} bus</span>` +
     `<span class="seat fst">${fmt(c.first)} first</span><span class="seat cgo">${fmt(c.cargo)}t cargo</span></div>`;
   const loadLine = (o: HubAdvice["buyOrders"][number]) =>
@@ -206,7 +310,7 @@ export function buildHubHtml(
         <div class="cfglbl">Set this config (sliders) →</div>${seatChips(o.config)}
         <div class="load">${loadLine(o)} · <span class="util">util ${pct(o.util)}</span></div>
         <div class="why">Flies: ${esc(o.routes.slice(0, 6).join(", "))}${o.routes.length > 6 ? ` +${o.routes.length - 6} more` : ""}</div>
-      </div>`,
+      </div>`
         )
         .join("")}</div>
       <div class="note" style="margin-top:8px">Counts &amp; routes come from running the <b>real optimizer</b> on these new aircraft (profit-validated — only planes that fly profitably are bought). “Set config” is what you slide on the buy screen; “each carries” is what it actually fills.</div>`
@@ -216,8 +320,11 @@ export function buildHubHtml(
     ? `<div class="warnbox">⚠ <b>${advice.smallRouteGap.length} route(s) need a SMALL aircraft</b> (category too low for the A350/A321 — route cat &lt; 5): ${esc(
         advice.smallRouteGap
           .slice(0, 10)
-          .map((g) => `${g.line.name} (cat ${g.line.category}, ${fmt(g.uncovered.eco)} eco/wk)`)
-          .join(", "),
+          .map(
+            (g) =>
+              `${g.line.name} (cat ${g.line.category}, ${fmt(g.uncovered.eco)} eco/wk)`
+          )
+          .join(", ")
       )}${advice.smallRouteGap.length > 10 ? ` +${advice.smallRouteGap.length - 10} more` : ""}. These stay unfilled until you add a narrowbody like the B727.</div>`
     : "";
 
@@ -227,11 +334,21 @@ export function buildHubHtml(
 
   // ── Routes — demand, what's missing now, and what's left AFTER buying ─────────
   const fillLabel = (u: HubAdvice["underserved"][number]) => {
-    if (u.fill.reuseIdle) return `↻ assign idle ${esc(u.fill.reuseIdle.model)} you own`;
-    if (u.fill.buyModel) return `🛒 ${esc(u.fill.buyModel.model)}${u.fill.cargoLed ? " (freighter)" : ""}`;
-    if (u.fill.note === "belly-cargo") return `📦 A350 belly (no freighter reaches)`;
-    if (u.fill.note === "low-cat") return `⚠ small aircraft (cat ≤ ${u.line.category})`;
-    if (u.fill.note === "no-reach") return `⚠ too far for any model`;
+    if (u.fill.reuseIdle) {
+      return `↻ assign idle ${esc(u.fill.reuseIdle.model)} you own`;
+    }
+    if (u.fill.buyModel) {
+      return `🛒 ${esc(u.fill.buyModel.model)}${u.fill.cargoLed ? " (freighter)" : ""}`;
+    }
+    if (u.fill.note === "belly-cargo") {
+      return "📦 A350 belly (no freighter reaches)";
+    }
+    if (u.fill.note === "low-cat") {
+      return `⚠ small aircraft (cat ≤ ${u.line.category})`;
+    }
+    if (u.fill.note === "no-reach") {
+      return "⚠ too far for any model";
+    }
     return "—";
   };
   // Eco fill per route table — built from ecoRouteRows (computed above, worst-first).
@@ -242,7 +359,13 @@ export function buildHubHtml(
         const u = underservedByLine.get(l.id);
         const below = cov < ECO_TARGET;
         const res = u?.residual;
-        const afterCell = !below ? `<span class="okc">✓</span>` : res ? (res.eco < 1 ? `<span class="okc">✓</span>` : `<span class="gap">${fmt(res.eco)}</span>`) : "—";
+        const afterCell = below
+          ? res
+            ? res.eco < 1
+              ? `<span class="okc">✓</span>`
+              : `<span class="gap">${fmt(res.eco)}</span>`
+            : "—"
+          : `<span class="okc">✓</span>`;
         return `<tr>
         <td><span class="dot" style="background:${l.color || "#999"}"></span>${esc(l.name)}</td>
         <td class="n">${l.category}</td><td class="n">${fmt(l.distance)}</td>
@@ -264,10 +387,15 @@ export function buildHubHtml(
       .map(({ l, cov }) => {
         const u = underservedByLine.get(l.id);
         let verdict: string;
-        if (u?.fill.note === "no-reach") verdict = `<b class="sell">SELL</b> — too far for any aircraft you can buy`;
-        else if (u?.fill.note === "low-cat") verdict = `<b class="sell">SELL</b> — needs a smaller aircraft (route cat ${l.category}); none in catalog`;
-        else if (u) verdict = `<span class="keep">KEEP &amp; buy</span> ${fillLabel(u)} — or sell`;
-        else verdict = `<span class="keep">KEEP &amp; buy</span> not enough aircraft here — or sell`;
+        if (u?.fill.note === "no-reach") {
+          verdict = `<b class="sell">SELL</b> — too far for any aircraft you can buy`;
+        } else if (u?.fill.note === "low-cat") {
+          verdict = `<b class="sell">SELL</b> — needs a smaller aircraft (route cat ${l.category}); none in catalog`;
+        } else if (u) {
+          verdict = `<span class="keep">KEEP &amp; buy</span> ${fillLabel(u)} — or sell`;
+        } else {
+          verdict = `<span class="keep">KEEP &amp; buy</span> not enough aircraft here — or sell`;
+        }
         return `<tr>
         <td><span class="dot" style="background:${l.color || "#999"}"></span>${esc(l.name)}</td>
         <td class="n">${l.category}</td><td class="n">${fmt(l.distance)}</td>
@@ -288,7 +416,7 @@ export function buildHubHtml(
         <div class="bt"><b>${s.count}× ${esc(s.model)}</b><span class="tag idle-tag">IDLE · cat ${s.cat} · ${fmt(s.range)}km</span><span class="cfg2">${s.seats.eco}/${s.seats.bus}/${s.seats.first} +${s.seats.cargo}t</span></div>
         <div class="why2"><b>Why idle:</b> ${esc(s.reason)}</div>
         <div class="actbox act-${s.action.kind}"><b>Do:</b> ${esc(s.action.text)}${s.alt ? `<span class="alt">${esc(s.alt)}</span>` : ""}</div>
-      </div>`,
+      </div>`
         )
         .join("")}</div>`
     : `<div class="why" style="color:var(--mut)">No idle aircraft — every plane you own at ${esc(hubCode)} is flying.</div>`;
@@ -439,10 +567,8 @@ export function buildHubHtml(
 }
 
 /**
- * Consolidated FLEET PLAN across all hubs: how many of each catalog aircraft to
- * buy to fully fill the routes you already own, with the total spend. Counts are
- * the "fully cover" ceiling (demand often dwarfs any realistic fleet) — the table
- * is sorted so the cheapest / most achievable hubs are obvious.
+ * Combined buy list across hubs (`data/report_SUMMARY.html`).
+ * Counts are a full-cover ceiling, not a realistic shopping list.
  */
 export function buildSummaryHtml(advices: HubAdvice[]): string {
   const models = BUY_CATALOG.map((m) => m.model);
@@ -458,18 +584,27 @@ export function buildSummaryHtml(advices: HubAdvice[]): string {
     return by;
   };
   const perHub = advices
-    .map((a) => ({ a, by: agg(a.buyOrders), total: a.buyOrders.reduce((s, o) => s + o.totalPrice, 0) }))
+    .map((a) => ({
+      a,
+      by: agg(a.buyOrders),
+      total: a.buyOrders.reduce((s, o) => s + o.totalPrice, 0),
+    }))
     .sort((x, y) => x.total - y.total);
   const grand = new Map<string, { count: number; price: number }>();
-  for (const ph of perHub) for (const [m, g] of ph.by) {
-    const x = grand.get(m) ?? { count: 0, price: 0 };
-    x.count += g.count;
-    x.price += g.price;
-    grand.set(m, x);
+  for (const ph of perHub) {
+    for (const [m, g] of ph.by) {
+      const x = grand.get(m) ?? { count: 0, price: 0 };
+      x.count += g.count;
+      x.price += g.price;
+      grand.set(m, x);
+    }
   }
   const grandTotal = perHub.reduce((s, ph) => s + ph.total, 0);
   const smallTotal = advices.reduce((s, a) => s + a.smallRouteGap.length, 0);
-  const bellyTotal = advices.reduce((s, a) => s + a.bellyCargo.reduce((t, b) => t + b.tons, 0), 0);
+  const bellyTotal = advices.reduce(
+    (s, a) => s + a.bellyCargo.reduce((t, b) => t + b.tons, 0),
+    0
+  );
 
   const modelCards = models
     .map((m) => {
@@ -483,12 +618,12 @@ export function buildSummaryHtml(advices: HubAdvice[]): string {
     .map(
       ({ a, by, total }) => `<tr>
       <td><a href="report_${esc(a.code)}.html"><b>${esc(a.code)}</b></a></td>
-      ${models.map((m) => `<td class="n">${by.get(m)?.count ? fmt(by.get(m)!.count) : "·"}</td>`).join("")}
+      ${models.map((m) => `<td class="n">${(by.get(m)?.count ?? 0) > 0 ? fmt(by.get(m)?.count ?? 0) : "·"}</td>`).join("")}
       <td class="n">$${fmt(total)}</td>
       <td class="n">${fmt(a.uncoveredEcoSeats)}</td>
       <td class="n">${fmt(a.uncoveredCargoTons)}</td>
       <td class="n">${a.smallRouteGap.length || "·"}</td>
-    </tr>`,
+    </tr>`
     )
     .join("");
 

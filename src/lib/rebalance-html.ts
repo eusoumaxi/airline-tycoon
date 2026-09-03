@@ -1,22 +1,22 @@
-// ───────────────────────────────────────────────────────────────────────────
-// HTML report for the cross-hub rebalancer (report-only — nothing is sent to the
-// game). Self-contained: dark theme, summary cards, methodology, per-hub sections
-// with before/after capacity breakdowns, every proposed move, and the idle fleet
-// with reasons. Matches the look of the existing src/html.ts.
-// ───────────────────────────────────────────────────────────────────────────
+/**
+ * @fileoverview Self-contained HTML for `bun run rebalance` (`data/report_REBALANCE.html`).
+ */
+import { esc, fmt, pct } from "./format.ts";
+import type {
+  AircraftOutcome,
+  ClassBreakdown,
+  HubPlan,
+  RebalanceResult,
+} from "./rebalance.ts";
+import { CABIN_CLASSES, type CabinClass } from "./types.ts";
 
-import type { CabinClass } from "./types.ts";
-import type { AircraftOutcome, ClassBreakdown, HubPlan, RebalanceResult } from "./rebalance.ts";
-
-const CLASSES: CabinClass[] = ["eco", "bus", "first", "cargo"];
-const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
-const fmt = (n: number) => Math.round(n).toLocaleString("en-US");
-const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
+const CLASSES = CABIN_CLASSES;
 const pct0 = (n: number) => `${Math.round(n * 100)}%`;
 
 const utilCls = (u: number) => (u >= 0.95 ? "hi" : u >= 0.8 ? "mid" : "lo");
 const covCls = (c: number) => (c < 0.5 ? "lo" : c < 0.9 ? "mid" : "hi");
-const cfg = (s: Record<CabinClass, number>) => `${fmt(s.eco)}/${fmt(s.bus)}/${fmt(s.first)} +${fmt(s.cargo)}t`;
+const cfg = (s: Record<CabinClass, number>) =>
+  `${fmt(s.eco)}/${fmt(s.bus)}/${fmt(s.first)} +${fmt(s.cargo)}t`;
 
 /** A small before→after bar (muted "before" underlay, colored "after" overlay). */
 function deltaBar(before: number, after: number, cls: string): string {
@@ -36,17 +36,19 @@ const strategyTag = (s: HubPlan["strategy"]) =>
 
 const statusTag = (s: AircraftOutcome["status"]) =>
   ({
-    "moved-in": `<span class="st mv">moved in</span>`,
     activated: `<span class="st act">activated</span>`,
-    kept: `<span class="st kept">kept</span>`,
     idle: `<span class="st idle">idle</span>`,
+    kept: `<span class="st kept">kept</span>`,
+    "moved-in": `<span class="st mv">moved in</span>`,
   })[s];
 
 /** Capacity table: per-class demand / offered / served / oversupply, before & after. */
 function breakdownTable(b: Record<CabinClass, ClassBreakdown>): string {
   const rows = CLASSES.map((c) => {
     const r = b[c];
-    if (r.demand === 0 && r.offeredAfter === 0 && r.offeredBefore === 0) return "";
+    if (r.demand === 0 && r.offeredAfter === 0 && r.offeredBefore === 0) {
+      return "";
+    }
     const covB = r.demand ? r.servedBefore / r.demand : 1;
     const covA = r.demand ? r.servedAfter / r.demand : 1;
     const unit = c === "cargo" ? " t" : "";
@@ -57,7 +59,7 @@ function breakdownTable(b: Record<CabinClass, ClassBreakdown>): string {
       <td class="n mut">${fmt(r.servedBefore)}</td>
       <td class="n">${fmt(r.offeredAfter)}</td>
       <td class="n"><b>${fmt(r.servedAfter)}</b></td>
-      <td class="n ${r.overAfter > 0 ? "over" : "mut"}">${r.overAfter > 0 ? "+" + fmt(r.overAfter) : "—"}</td>
+      <td class="n ${r.overAfter > 0 ? "over" : "mut"}">${r.overAfter > 0 ? `+${fmt(r.overAfter)}` : "—"}</td>
       <td class="barcell">${deltaBar(covB, covA, covCls(covA))}<span class="covn ${covCls(covA)}">${pct0(covA)}</span></td>
     </tr>`;
   }).join("");
@@ -66,9 +68,14 @@ function breakdownTable(b: Record<CabinClass, ClassBreakdown>): string {
 
 /** Compact table of aircraft assigned to a hub (capped — full set is in the plan JSON). */
 function assignedTable(list: AircraftOutcome[], cap = 60): string {
-  if (list.length === 0) return `<div class="muted">No aircraft assigned.</div>`;
+  if (list.length === 0) {
+    return `<div class="muted">No aircraft assigned.</div>`;
+  }
   const sorted = list.slice().sort((x, y) => y.utilAfter - x.utilAfter);
-  const extra = sorted.length > cap ? `<div class="muted">… and ${sorted.length - cap} more aircraft based here (full list in rebalance_plan.json).</div>` : "";
+  const extra =
+    sorted.length > cap
+      ? `<div class="muted">… and ${sorted.length - cap} more aircraft based here (full list in rebalance_plan.json).</div>`
+      : "";
   const rows = sorted
     .slice(0, cap)
     .map(
@@ -79,7 +86,7 @@ function assignedTable(list: AircraftOutcome[], cap = 60): string {
       <td class="n">${o.flightsAfter}</td>
       <td class="n"><span class="u ${utilCls(o.utilBefore)}">${pct0(o.utilBefore)}</span> → <span class="u ${utilCls(o.utilAfter)}">${pct0(o.utilAfter)}</span></td>
       <td class="rs">${esc(o.routes.slice(0, 5).join(", "))}${o.routes.length > 5 ? ` +${o.routes.length - 5}` : ""}</td>
-    </tr>`,
+    </tr>`
     )
     .join("");
   return `<table class="ac"><thead><tr><th></th><th>Aircraft</th><th class="n">cat</th><th class="n">flts</th><th class="n">util before→after</th><th>Routes</th></tr></thead><tbody>${rows}</tbody></table>${extra}`;
@@ -87,15 +94,26 @@ function assignedTable(list: AircraftOutcome[], cap = 60): string {
 
 /** One collapsible hub section. */
 function hubSection(h: HubPlan): string {
-  const targetBadge = h.strategy !== "starved" ? (h.hitTarget ? `<span class="tgt ok">✓ ≥95% util</span>` : `<span class="tgt no">below 95% util</span>`) : "";
+  const targetBadge =
+    h.strategy === "starved"
+      ? ""
+      : h.hitTarget
+        ? `<span class="tgt ok">✓ ≥95% util</span>`
+        : `<span class="tgt no">below 95% util</span>`;
   const ICAP = 60;
-  const incSorted = h.incoming.slice().sort((a, b) => b.utilAfter - a.utilAfter);
-  const incExtra = incSorted.length > ICAP ? `<div class="muted">… and ${incSorted.length - ICAP} more moved in (full list in rebalance_plan.json).</div>` : "";
+  const incSorted = h.incoming
+    .slice()
+    .sort((a, b) => b.utilAfter - a.utilAfter);
+  const incExtra =
+    incSorted.length > ICAP
+      ? `<div class="muted">… and ${incSorted.length - ICAP} more moved in (full list in rebalance_plan.json).</div>`
+      : "";
   const incomingHtml = h.incoming.length
     ? `<table class="ac"><thead><tr><th>Aircraft</th><th>From</th><th class="n">cat/range</th><th>Config (e/b/f+cgo)</th><th class="n">util here</th><th>Now flies</th></tr></thead><tbody>${incSorted
         .slice(0, ICAP)
         .map(
-          (o) => `<tr><td><b>${esc(o.name)}</b> <i class="mut">${esc(o.model)}</i></td><td><span class="frm">${esc(o.originCode)} →</span></td><td class="n mut">${o.category}/${fmt(o.range)}</td><td class="mono">${cfg(o.seats)}</td><td class="n"><span class="u ${utilCls(o.utilAfter)}">${pct0(o.utilAfter)}</span></td><td class="rs">${esc(o.routes.slice(0, 4).join(", "))}${o.routes.length > 4 ? ` +${o.routes.length - 4}` : ""}</td></tr>`,
+          (o) =>
+            `<tr><td><b>${esc(o.name)}</b> <i class="mut">${esc(o.model)}</i></td><td><span class="frm">${esc(o.originCode)} →</span></td><td class="n mut">${o.category}/${fmt(o.range)}</td><td class="mono">${cfg(o.seats)}</td><td class="n"><span class="u ${utilCls(o.utilAfter)}">${pct0(o.utilAfter)}</span></td><td class="rs">${esc(o.routes.slice(0, 4).join(", "))}${o.routes.length > 4 ? ` +${o.routes.length - 4}` : ""}</td></tr>`
         )
         .join("")}</tbody></table>${incExtra}`
     : `<div class="muted">No aircraft moved in.</div>`;
@@ -103,8 +121,13 @@ function hubSection(h: HubPlan): string {
   const outHtml = h.outgoing.length
     ? `<div class="outc">${h.outgoing
         .slice(0, OCAP)
-        .map((o) => `<span class="chip mv">${esc(o.name)} <i>${esc(o.model)}</i> → ${esc(o.destCode)}</span>`)
-        .join("")}</div>${h.outgoing.length > OCAP ? `<div class="muted">… and ${h.outgoing.length - OCAP} more relocated away.</div>` : ""}`
+        .map(
+          (o) =>
+            `<span class="chip mv">${esc(o.name)} <i>${esc(o.model)}</i> → ${esc(o.destCode)}</span>`
+        )
+        .join(
+          ""
+        )}</div>${h.outgoing.length > OCAP ? `<div class="muted">… and ${h.outgoing.length - OCAP} more relocated away.</div>` : ""}`
     : `<div class="muted">Nothing relocated away from this hub.</div>`;
 
   return `<details class="hub">
@@ -141,15 +164,25 @@ function hubSection(h: HubPlan): string {
   </details>`;
 }
 
-export function buildRebalanceHtml(r: RebalanceResult, meta: { fetchedAt: string; source: string }): string {
-  const changed = r.hubs.filter((h) => h.strategy === "reinforced" || h.strategy === "donor");
+/** HTML report for `bun run rebalance` (`data/report_REBALANCE.html`). */
+export function buildRebalanceHtml(
+  r: RebalanceResult,
+  meta: { fetchedAt: string; source: string }
+): string {
+  const changed = r.hubs.filter(
+    (h) => h.strategy === "reinforced" || h.strategy === "donor"
+  );
   const stable = r.hubs.filter((h) => h.strategy === "stable");
   const starved = r.hubs.filter((h) => h.strategy === "starved");
   const totalAircraft = r.outcomes.size;
   const idleBefore = r.before.idle;
   const idleAfter = r.idle.length;
-  const activated = [...r.outcomes.values()].filter((o) => o.status === "activated").length;
-  const hubsBelowTarget = r.hubs.filter((h) => h.strategy !== "starved" && !h.hitTarget);
+  const activated = [...r.outcomes.values()].filter(
+    (o) => o.status === "activated"
+  ).length;
+  const hubsBelowTarget = r.hubs.filter(
+    (h) => h.strategy !== "starved" && !h.hitTarget
+  );
 
   // ── Order table ──────────────────────────────────────────────────────────────
   const orderRows = r.hubs
@@ -163,8 +196,8 @@ export function buildRebalanceHtml(r: RebalanceResult, meta: { fetchedAt: string
       <td class="n"><span class="u ${utilCls(h.utilBefore)}">${pct0(h.utilBefore)}</span><span class="ar">→</span><span class="u ${utilCls(h.utilAfter)}">${pct0(h.utilAfter)}</span></td>
       <td class="n"><span class="u ${covCls(h.coverageBeforeEco)}">${pct0(h.coverageBeforeEco)}</span><span class="ar">→</span><span class="u ${covCls(h.coverageAfterEco)}">${pct0(h.coverageAfterEco)}</span></td>
       <td class="n">${h.incoming.length ? `<span class="in">+${h.incoming.length}</span>` : "·"} ${h.outgoing.length ? `<span class="out">−${h.outgoing.length}</span>` : ""}</td>
-      <td>${h.strategy !== "starved" ? (h.hitTarget ? `<span class="tgt ok">✓</span>` : `<span class="tgt no">↓</span>`) : "—"}</td>
-    </tr>`,
+      <td>${h.strategy === "starved" ? "—" : h.hitTarget ? `<span class="tgt ok">✓</span>` : `<span class="tgt no">↓</span>`}</td>
+    </tr>`
     )
     .join("");
 
@@ -179,8 +212,16 @@ export function buildRebalanceHtml(r: RebalanceResult, meta: { fetchedAt: string
 
   // ── Master moves table (capped; the full set is always in rebalance_plan.json) ──
   const MCAP = 1000;
-  const movesSorted = r.moves.slice().sort((x, y) => x.destCode.localeCompare(y.destCode) || y.utilAfter - x.utilAfter);
-  const movesExtra = movesSorted.length > MCAP ? `<div class="muted">… and ${movesSorted.length - MCAP} more moves — the complete list is in <code>rebalance_plan.json</code>.</div>` : "";
+  const movesSorted = r.moves
+    .slice()
+    .sort(
+      (x, y) =>
+        x.destCode.localeCompare(y.destCode) || y.utilAfter - x.utilAfter
+    );
+  const movesExtra =
+    movesSorted.length > MCAP
+      ? `<div class="muted">… and ${movesSorted.length - MCAP} more moves — the complete list is in <code>rebalance_plan.json</code>.</div>`
+      : "";
   const movesRows = movesSorted
     .slice(0, MCAP)
     .map(
@@ -192,17 +233,22 @@ export function buildRebalanceHtml(r: RebalanceResult, meta: { fetchedAt: string
       <td class="mono">${cfg(o.seats)}</td>
       <td class="n"><span class="u ${utilCls(o.utilBefore)}">${pct0(o.utilBefore)}</span> → <span class="u ${utilCls(o.utilAfter)}">${pct0(o.utilAfter)}</span></td>
       <td class="rs">${esc(o.routes.slice(0, 4).join(", "))}${o.routes.length > 4 ? ` +${o.routes.length - 4}` : ""}</td>
-    </tr>`,
+    </tr>`
     )
     .join("");
 
   // ── Idle aircraft, grouped by model + reason ─────────────────────────────────
   const idleByModel = new Map<string, AircraftOutcome[]>();
-  for (const o of r.idle) (idleByModel.get(o.model) ?? idleByModel.set(o.model, []).get(o.model)!).push(o);
+  for (const o of r.idle) {
+    (
+      idleByModel.get(o.model) ?? idleByModel.set(o.model, []).get(o.model)!
+    ).push(o);
+  }
   const idleCards = [...idleByModel.entries()]
     .sort((a, b) => b[1].length - a[1].length)
     .map(([model, list]) => {
-      const reason = (list[0] as AircraftOutcome & { reasoning?: string }).reasoning ?? "";
+      const reason =
+        (list[0] as AircraftOutcome & { reasoning?: string }).reasoning ?? "";
       const homes = [...new Set(list.map((o) => o.originCode))].join(", ");
       return `<div class="idlec">
         <div class="bt"><b>${list.length}× ${esc(model)}</b><span class="tag idle-tag">cat ${list[0].category} · ${fmt(list[0].range)}km</span><span class="cfg2">at ${esc(homes)}</span></div>
@@ -214,19 +260,36 @@ export function buildRebalanceHtml(r: RebalanceResult, meta: { fetchedAt: string
   // ── Headline deltas ──────────────────────────────────────────────────────────
   const valDelta = r.after.servedValue - r.before.servedValue;
   const valPct = r.before.servedValue ? valDelta / r.before.servedValue : 0;
-  const ecoB = r.before.coverage.eco.demand ? r.before.coverage.eco.served / r.before.coverage.eco.demand : 0;
-  const ecoA = r.after.coverage.eco.demand ? r.after.coverage.eco.served / r.after.coverage.eco.demand : 0;
-  const cargoB = r.before.coverage.cargo.demand ? r.before.coverage.cargo.served / r.before.coverage.cargo.demand : 0;
-  const cargoA = r.after.coverage.cargo.demand ? r.after.coverage.cargo.served / r.after.coverage.cargo.demand : 0;
+  const ecoB = r.before.coverage.eco.demand
+    ? r.before.coverage.eco.served / r.before.coverage.eco.demand
+    : 0;
+  const ecoA = r.after.coverage.eco.demand
+    ? r.after.coverage.eco.served / r.after.coverage.eco.demand
+    : 0;
+  const cargoB = r.before.coverage.cargo.demand
+    ? r.before.coverage.cargo.served / r.before.coverage.cargo.demand
+    : 0;
+  const cargoA = r.after.coverage.cargo.demand
+    ? r.after.coverage.cargo.served / r.after.coverage.cargo.demand
+    : 0;
   const idleDeployed = idleBefore - idleAfter;
   const workingMoved = r.moves.filter((o) => o.utilBefore > 0).length;
   const freighters = [...r.outcomes.values()].filter((o) => o.isCargo);
   const freightMoved = freighters.filter((o) => o.moved).length;
-  const reinforcedCodes = r.hubs.filter((h) => h.strategy === "reinforced").map((h) => h.code);
+  const _reinforcedCodes = r.hubs
+    .filter((h) => h.strategy === "reinforced")
+    .map((h) => h.code);
   const topHub = r.hubs[0]; // most routes = #1 priority
-  const topCargoB = topHub && topHub.breakdown.cargo.demand ? topHub.breakdown.cargo.servedBefore / topHub.breakdown.cargo.demand : 0;
-  const topCargoA = topHub && topHub.breakdown.cargo.demand ? topHub.breakdown.cargo.servedAfter / topHub.breakdown.cargo.demand : 0;
-  const ecoOversupply = r.hubs.reduce((s, h) => s + h.breakdown.eco.overAfter, 0);
+  const topCargoB = topHub?.breakdown.cargo.demand
+    ? topHub.breakdown.cargo.servedBefore / topHub.breakdown.cargo.demand
+    : 0;
+  const topCargoA = topHub?.breakdown.cargo.demand
+    ? topHub.breakdown.cargo.servedAfter / topHub.breakdown.cargo.demand
+    : 0;
+  const ecoOversupply = r.hubs.reduce(
+    (s, h) => s + h.breakdown.eco.overAfter,
+    0
+  );
   const starvedCodes = starved.map((h) => h.code);
 
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
